@@ -265,9 +265,14 @@ def send_approval_request(leave_request):
         # Save the message timestamp so we can update it later
         leave_request.slack_message_ts = response["ts"]
         leave_request.slack_channel_id = response["channel"]
-        leave_request.save(update_fields=["slack_message_ts"])
+        leave_request.save(update_fields=["slack_message_ts", "slack_channel_id"])
         
     except SlackApiError as e:
+        print("\n" + "="*60)
+        print("!!! SLACK API ERROR WHILE SENDING APPROVAL REQUEST !!!")
+        print(f"SLACK'S ERROR MESSAGE: '{e.response['error']}'")
+        print(f"FULL SLACK RESPONSE: {e.response}")
+        print("="*60 + "\n")
         logger.error(f"Error sending approval request DM: {e.response['error']}")
 
 def update_approval_message(leave_request: LeaveRequest):
@@ -284,7 +289,7 @@ def update_approval_message(leave_request: LeaveRequest):
     try:
         # Get the blocks for the completed state
         blocks = get_approval_message_blocks(leave_request, is_completed=True)
-        print(f"--- DEBUG: Attempting to update message in channel '{leave_request.slack_channel_id}' at timestamp '{leave_request.slack_message_ts}' ---")
+
 
         
         # Use the saved channel_id and message_ts for the update
