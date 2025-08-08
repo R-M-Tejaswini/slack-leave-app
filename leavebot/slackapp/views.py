@@ -14,8 +14,6 @@ from django.views.decorators.http import require_POST
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-# --- Updated Imports ---
-# Import all the new models you created
 from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit, Holiday
 from .utils import verify_slack_request
 from .slack_blocks import get_leave_form_modal, get_approval_message_blocks
@@ -33,8 +31,9 @@ logger = logging.getLogger("slackapp")
 @require_POST
 def slash_command(request):
     """
-    Handle the /applyleave slash command.
-    Verifies the user and opens the leave request modal.
+    Handles incoming slash commands from Slack (e.g., /applyleave).
+    It verifies the request and triggers the appropriate initial action,
+    such as opening a modal.
     """
     try:
         if not verify_slack_request(request):
@@ -73,8 +72,8 @@ def slash_command(request):
 @require_POST
 def interactions(request):
     """
-    Handles all interactions from Slack (e.g., modal submissions, button clicks).
-    Acts as a router to the appropriate handler function.
+    Acts as a router for all Slack interactive components, such as modal
+    submissions and button clicks, directing the payload to the correct handler.
     """
     try:
         if not verify_slack_request(request):
@@ -96,14 +95,14 @@ def interactions(request):
         return HttpResponse("An error occurred while processing your request.")
 
 # ==============================================================================
-# 2. Interaction Handlers (The core logic of your app)
+# 2. Interaction Handlers (The core logic of app)
 # ==============================================================================
 
 @transaction.atomic
 def handle_modal_submission(payload):
     """
-    --- CORRECTED VALIDATION ORDER ---
-    Handles the submission of the leave request modal with specific error messages.
+    Handles the submission of the leave request modal. This function contains
+    all business logic for validating a new leave request before creation.
     """
     try:
         user_info = payload["user"]
@@ -118,7 +117,6 @@ def handle_modal_submission(payload):
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
 
-        # === RE-ORDERED VALIDATION LOGIC ===
 
         # 1. Basic Date Sanity Checks
         if start_date < date.today():
@@ -157,7 +155,7 @@ def handle_modal_submission(payload):
         if overlapping_requests:
             return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "You already have an approved or pending leave request that overlaps with these dates."}})
         
-        # 4. --- NEW: Check Monthly Leave Allowance ---
+
         # Find all approved/pending leaves for the employee in the month of the start date
         month_start = start_date.replace(day=1)
         
@@ -218,8 +216,7 @@ def handle_modal_submission(payload):
 @transaction.atomic
 def handle_button_actions(payload):
     """
-    --- UPDATED LOGIC ---
-    Handles manager's approval/rejection and posts public announcement on approval.
+    Handles a manager's approval or rejection action from a button click.
     """
     try:
         user_info = payload["user"]
@@ -239,7 +236,7 @@ def handle_button_actions(payload):
             leave_request.status = "approved"
             status_text = "approved"
             
-            # --- NEW: POST PUBLIC ANNOUNCEMENT ON APPROVAL ---
+
             post_public_announcement(leave_request)
 
         elif action_id == "reject_leave":
@@ -271,9 +268,10 @@ def handle_button_actions(payload):
 
 def send_approval_request(leave_request):
     """
-    Finds the employee's manager and sends them a DM with the request.
-    Falls back to a general channel if no manager is assigned.
+    Sends a leave request notification to the appropriate manager via DM,
+    with a fallback to a general channel.
     """
+
     employee = leave_request.employee
     
     # Determine the destination: manager's DM or a fallback channel
@@ -312,10 +310,11 @@ def send_approval_request(leave_request):
 
 def update_approval_message(leave_request: LeaveRequest):
     """
-    Updates the original manager's message to show the final status
-    and remove the action buttons. This version reads the exact location
-    from the database.
+
+    Updates the original manager's message to show the final status, removing
+    the action buttons to prevent duplicate actions.
     """
+
     # If we don't have a channel and message ID, we can't update anything.
     if not (leave_request.slack_channel_id and leave_request.slack_message_ts):
         logger.error(f"Missing channel or timestamp for LeaveRequest #{leave_request.id}, cannot update approval message.")
@@ -361,8 +360,10 @@ def notify_employee(leave_request):
 
 def post_public_announcement(leave_request: LeaveRequest):
     """
-    Posts a public message about an approved leave to a general channel.
+    Posts a public, privacy-conscious announcement about an approved leave
+    to a designated company-wide channel.
     """
+
     channel_id = os.getenv("SLACK_REQUEST_CHANNEL") # Using the variable name you specified
     if not channel_id:
         logger.warning("SLACK_REQUEST_CHANNEL not set. Skipping public announcement.")

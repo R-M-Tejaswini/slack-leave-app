@@ -4,10 +4,16 @@ from .models import LeaveType, LeaveRequest # Import the new models
 
 def get_leave_form_modal():
     """
-    Generates the Slack modal for the leave request form.
-    This function now dynamically populates the 'Leave Type' dropdown
-    from the LeaveType model in your database.
+    Generates the Slack modal view for the leave request form.
+
+    This function dynamically populates the 'Leave Type' dropdown menu by
+    querying all available LeaveType objects from the database, making the
+    form flexible and manageable via the Django admin panel.
+
+    Returns:
+        dict: The JSON structure for the Slack modal view.
     """
+
     tomorrow = (date.today() + timedelta(days=1)).strftime('%Y-%m-%d')
 
     # --- Dynamic Leave Type Options ---

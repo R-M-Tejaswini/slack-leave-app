@@ -4,13 +4,13 @@ from django.utils import timezone
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 1. Employee, LeaveType, and NEW Holiday Models
+# CORE DATA MODELS
 # ==============================================================================
 
 class Employee(models.Model):
     """
-    Stores Slack user information and manager relationships. This is the central
-    source of truth for all users interacting with the app.
+    Represents an employee in the system, linking their Slack identity to their
+    role within the organization's hierarchy.
     """
     slack_user_id = models.CharField(max_length=50, unique=True, help_text="Employee's unique Slack user ID")
     name = models.CharField(max_length=100, help_text="Employee's full name")
@@ -32,8 +32,8 @@ class Employee(models.Model):
 
 class LeaveType(models.Model):
     """
-    Creates a manageable list of leave types in the database, instead of
-    hardcoding them in the model. This is much more flexible.
+    Defines a category of leave (e.g., Vacation, Sick Leave). Storing this in the
+    database allows for easy management without code changes.
     """
     name = models.CharField(max_length=50, unique=True)
     description = models.TextField(blank=True)
@@ -41,10 +41,10 @@ class LeaveType(models.Model):
     def __str__(self):
         return self.name
 
-# --- NEW MODEL FOR COMPANY HOLIDAYS ---
 class Holiday(models.Model):
     """
-    Stores company-wide holidays to exclude them from leave calculations.
+    Stores official company-wide holidays. These dates are excluded from
+    leave duration calculations.
     """
     name = models.CharField(max_length=100)
     date = models.DateField(unique=True)
@@ -53,10 +53,14 @@ class Holiday(models.Model):
         return f"{self.name} ({self.date})"
 
 # ==============================================================================
-# 2. The New and Improved LeaveRequest Model
+# TRANSACTIONAL MODELS
 # ==============================================================================
 
 class LeaveRequest(models.Model):
+    """
+    Represents a single leave request submitted by an employee. This is the
+    central transactional model of the application.
+    """
     STATUS_CHOICES = [
         ('pending', 'Pending'),
         ('approved', 'Approved'),
@@ -72,11 +76,15 @@ class LeaveRequest(models.Model):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
     approver = models.ForeignKey(Employee, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_requests')
     approval_notes = models.TextField(blank=True, help_text="Manager's notes on the decision")
+    
+    # Slack-specific fields to track the approval message
     slack_message_ts = models.CharField(max_length=50, blank=True, help_text="Slack message timestamp")
     slack_channel_id = models.CharField(max_length=50, blank=True, help_text="Slack channel ID where the approval message was sent")
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+
     class Meta:
         ordering = ['-created_at']
 
@@ -86,9 +94,8 @@ class LeaveRequest(models.Model):
     @property
     def duration_days(self):
         """
-        --- UPDATED LOGIC ---
-        Calculate the number of business days (Mon-Fri) for the leave request,
-        excluding any company holidays.
+        Calculates the number of business days (Mon-Fri) for the leave request,
+        intelligently excluding any company holidays that fall within the range.
         """
         if not self.end_date:
             return 1
@@ -106,10 +113,11 @@ class LeaveRequest(models.Model):
             
         return business_days if business_days > 0 else 1
 
-# ==============================================================================
-# 3. Audit Model (Advanced, but good for tracking changes)
-# ==============================================================================
 class LeaveRequestAudit(models.Model):
+    """
+    Creates a non-editable audit trail for every significant action taken on a
+    leave request, ensuring accountability and history tracking.
+    """
     leave_request = models.ForeignKey(LeaveRequest, on_delete=models.CASCADE, related_name='audit_trail')
     action = models.CharField(max_length=50, help_text="Action performed (e.g., 'created', 'approved')")
     performed_by = models.ForeignKey(Employee, on_delete=models.SET_NULL, null=True, blank=True)
@@ -120,4 +128,4 @@ class LeaveRequestAudit(models.Model):
         ordering = ['-timestamp']
 
     def __str__(self):
-        return f"{self.leave_request.id}: {self.action} by {self.performed_by.name if self.performed_by else 'System'}"
+        return f"Audit for Request #{self.leave_request.id}: {self.action}"

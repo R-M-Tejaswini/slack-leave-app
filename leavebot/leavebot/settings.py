@@ -1,4 +1,12 @@
-# settings.py (Fresh Copy)
+# leavebot/leavebot/settings.py
+"""
+Django settings for the leavebot project.
+
+This file contains the core configuration for the Django application, including
+database settings, application definitions, middleware, and security keys.
+It is configured to load sensitive information from a .env file for security
+and portability.
+"""
 
 from pathlib import Path
 import os
@@ -6,20 +14,37 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+# ==============================================================================
+# CORE SETTINGS
+# ==============================================================================
+
+# Build paths inside the project like this: BASE_DIR / 'subdir'
 BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = '3s46c_-r!p6jh#+q_u7!gwy+6hycu7*2_ofy0jq$r@a)=h_hou'
-DEBUG=True
-ALLOWED_HOSTS = [    "127.0.0.1",
+# The DEBUG flag is loaded as a boolean from an environment variable.
+DEBUG = os.getenv('DJANGO_DEBUG', 'True') == 'True'
+
+# Define the allowed hosts. For production, this should be your domain name.
+# The production domain should be loaded from an environment variable.
+ALLOWED_HOSTS = [
+    "127.0.0.1",
     "localhost",
-    "27b68883239b.ngrok-free.app",]
+    os.getenv('PRODUCTION_HOST'), # e.g., your ngrok URL or final domain
+]
 
 
-#Slack settings
+# ==============================================================================
+# APPLICATION-SPECIFIC SETTINGS (Loaded from Environment Variables)
+# ==============================================================================
 
-SLACK_SIGNING_SECRET  = os.getenv("SLACK_SIGNING_SECRET")
-SLACK_BOT_TOKEN       = os.getenv("SLACK_BOT_TOKEN")
+SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_REQUEST_CHANNEL = os.getenv("SLACK_REQUEST_CHANNEL")
+
+
+# ==============================================================================
+# DJANGO-SPECIFIC CONFIGURATION
+# ==============================================================================
 
 # Application definition
 INSTALLED_APPS = [
@@ -29,7 +54,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'slackapp',
+    'slackapp.apps.SlackappConfig', # Use the AppConfig for better structure
 ]
 
 MIDDLEWARE = [
@@ -62,7 +87,9 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'leavebot.wsgi.application'
 
-# Database
+
+# Database Configuration
+# https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
@@ -70,32 +97,36 @@ DATABASES = {
     }
 }
 
+
 # Password validation
+# https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
 AUTH_PASSWORD_VALIDATORS = [
-    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',},
-    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',},
-    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',},
-    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',},
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
+
 # Internationalization
+# https://docs.djangoproject.com/en/4.2/topics/i18n/
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True
 
+
 # Static files (CSS, JavaScript, Images)
+# https://docs.djangoproject.com/en/4.2/howto/static-files/
 STATIC_URL = 'static/'
 
+
 # Default primary key field type
+# https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-#Slack settings
-SLACK_SIGNING_SECRET  = os.getenv("SLACK_SIGNING_SECRET")
-SLACK_BOT_TOKEN       = os.getenv("SLACK_BOT_TOKEN")
-SLACK_REQUEST_CHANNEL = os.getenv("SLACK_REQUEST_CHANNEL")
 
-# Logging configuration
+# Logging Configuration
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,

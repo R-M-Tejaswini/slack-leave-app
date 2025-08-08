@@ -1,4 +1,11 @@
 # leavebot/slackapp/admin.py
+"""
+Admin panel configuration for the slackapp.
+
+This file defines how the models are displayed and managed in the Django
+admin interface. Using ModelAdmin classes allows for rich customization
+of the admin experience.
+"""
 from django.contrib import admin
 from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit, Holiday
 
