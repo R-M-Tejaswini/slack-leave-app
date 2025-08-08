@@ -128,19 +128,19 @@ def handle_modal_submission(payload):
         
         # 2. Check for Weekends and Holidays FIRST
         holidays = set(Holiday.objects.filter(date__range=[start_date, end_date]).values_list('date', flat=True))
-        business_days_in_range = 0
+        requested_days = 0
         is_range_a_holiday = False
         
         current_date_iterator = start_date
         while current_date_iterator <= end_date:
             if current_date_iterator.weekday() < 5:
                 if current_date_iterator not in holidays:
-                    business_days_in_range += 1
+                    requested_days += 1
                 else:
                     is_range_a_holiday = True
             current_date_iterator += timedelta(days=1)
         
-        if business_days_in_range == 0:
+        if requested_days == 0:
             if is_range_a_holiday:
                 return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "The selected date range falls on a company holiday."}})
             else:
@@ -156,6 +156,38 @@ def handle_modal_submission(payload):
 
         if overlapping_requests:
             return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "You already have an approved or pending leave request that overlaps with these dates."}})
+        
+        # 4. --- NEW: Check Monthly Leave Allowance ---
+        # Find all approved/pending leaves for the employee in the month of the start date
+        month_start = start_date.replace(day=1)
+        
+        # Get all approved/pending requests that start in the same month and year
+        requests_this_month = LeaveRequest.objects.filter(
+            employee=employee,
+            status__in=['pending', 'approved'],
+            start_date__year=month_start.year,
+            start_date__month=month_start.month
+        )
+        
+        # Calculate days already taken/requested this month
+        days_taken_this_month = 0
+        for req in requests_this_month:
+            days_taken_this_month += req.duration_days
+        
+        allowance = employee.monthly_leave_allowance
+        remaining_allowance = allowance - days_taken_this_month
+
+        if requested_days > remaining_allowance:
+            return JsonResponse({
+                "response_action": "errors",
+                "errors": {
+                    "start_date_block": (
+                        f"You have exceeded your monthly allowance. "
+                        f"You have {remaining_allowance} days left this month but are requesting {requested_days}."
+                    )
+                }
+            })
+
         
         # If all checks pass, proceed...
         leave_type = LeaveType.objects.get(name=leave_type_str)

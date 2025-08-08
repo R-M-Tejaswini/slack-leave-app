@@ -23,6 +23,7 @@ class Employee(models.Model):
         related_name='direct_reports',
         help_text="The direct manager of this employee"
     )
+    monthly_leave_allowance = models.PositiveSmallIntegerField(default=2, help_text="Number of leave days allowed per month")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
