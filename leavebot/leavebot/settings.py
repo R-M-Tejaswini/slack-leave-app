@@ -29,6 +29,7 @@ DEBUG = os.getenv('DJANGO_DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = [
     "127.0.0.1",
     "localhost",
+    "27b68883239b.ngrok-free.app",
     os.getenv('PRODUCTION_HOST'), # e.g., your ngrok URL or final domain
 ]
 
@@ -149,3 +150,15 @@ LOGGING = {
         },
     },
 }
+
+# ==============================================================================
+# CELERY CONFIGURATION
+# ==============================================================================
+# URL for the Redis message broker.
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+# URL for the result backend (can be the same as the broker).
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+# Use JSON as the content type for tasks.
+CELERY_ACCEPT_CONTENT = ['json']
+# Use JSON as the task serializer.
+CELERY_TASK_SERIALIZER = 'json'

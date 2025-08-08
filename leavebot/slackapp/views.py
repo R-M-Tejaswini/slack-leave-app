@@ -17,6 +17,7 @@ from slack_sdk.errors import SlackApiError
 from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit, Holiday
 from .utils import verify_slack_request
 from .slack_blocks import get_leave_form_modal, get_approval_message_blocks
+from .tasks import send_manager_reminder
 
 # --- Initialization ---
 slack_client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
@@ -200,6 +201,10 @@ def handle_modal_submission(payload):
         LeaveRequestAudit.objects.create(leave_request=leave_request, action="created", performed_by=employee)
         logger.info(f"Leave Request #{leave_request.id} created for {employee.name}")
 
+        # Schedule the reminder to be sent in 24 hours (86400 seconds).
+        # apply_async is used for more explicit task options like countdown.
+        send_manager_reminder.apply_async(args=[leave_request.id], countdown=120) #86400)
+ 
         send_approval_request(leave_request)
         slack_client.chat_postMessage(channel=employee.slack_user_id, text=f"Your leave request for *{leave_type.name}* from {start_date} to {end_date} has been submitted successfully.")
         return HttpResponse(status=200)
