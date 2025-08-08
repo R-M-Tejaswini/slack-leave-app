@@ -4,9 +4,10 @@ import json
 import logging
 import os
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from django.db import transaction
+from django.db.models import Q 
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
@@ -15,7 +16,7 @@ from slack_sdk.errors import SlackApiError
 
 # --- Updated Imports ---
 # Import all the new models you created
-from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit
+from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit, Holiday
 from .utils import verify_slack_request
 from .slack_blocks import get_leave_form_modal, get_approval_message_blocks
 
@@ -101,41 +102,64 @@ def interactions(request):
 @transaction.atomic
 def handle_modal_submission(payload):
     """
-    Handles the submission of the leave request modal.
-    Creates the LeaveRequest and notifies the manager.
+    --- CORRECTED VALIDATION ORDER ---
+    Handles the submission of the leave request modal with specific error messages.
     """
     try:
         user_info = payload["user"]
         values = payload["view"]["state"]["values"]
-
-        # --- Use the new Employee model ---
-        # Find the employee in our database who submitted the form.
-        try:
-            employee = Employee.objects.get(slack_user_id=user_info["id"])
-        except Employee.DoesNotExist:
-            logger.error(f"Employee with slack_user_id {user_info['id']} not found in database.")
-            # You can send an error message back to the user in the modal here
-            return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Your user profile was not found in the system. Please contact admin."}})
+        employee = Employee.objects.get(slack_user_id=user_info["id"])
         
-        # --- Extract and validate form data ---
         start_date_str = values["start_date_block"]["start_date_input"]["selected_date"]
         end_date_str = values["end_date_block"]["end_date_input"]["selected_date"]
         leave_type_str = values["leave_type_block"]["leave_type_select"]["selected_option"]["value"]
         reason = values["reason_block"]["reason_input"]["value"] or ""
 
-        # --- Use the new LeaveType model ---
-        try:
-            leave_type = LeaveType.objects.get(name=leave_type_str)
-        except LeaveType.DoesNotExist:
-             return JsonResponse({"response_action": "errors", "errors": {"leave_type_block": f"The selected leave type '{leave_type_str}' is not valid."}})
-
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
 
+        # === RE-ORDERED VALIDATION LOGIC ===
+
+        # 1. Basic Date Sanity Checks
+        if start_date < date.today():
+            return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Leave requests cannot be for a date in the past."}})
         if end_date < start_date:
             return JsonResponse({"response_action": "errors", "errors": {"end_date_block": "End date cannot be before the start date."}})
         
-        # --- Create the LeaveRequest with foreign keys ---
+        # 2. Check for Weekends and Holidays FIRST
+        holidays = set(Holiday.objects.filter(date__range=[start_date, end_date]).values_list('date', flat=True))
+        business_days_in_range = 0
+        is_range_a_holiday = False
+        
+        current_date_iterator = start_date
+        while current_date_iterator <= end_date:
+            if current_date_iterator.weekday() < 5:
+                if current_date_iterator not in holidays:
+                    business_days_in_range += 1
+                else:
+                    is_range_a_holiday = True
+            current_date_iterator += timedelta(days=1)
+        
+        if business_days_in_range == 0:
+            if is_range_a_holiday:
+                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "The selected date range falls on a company holiday."}})
+            else:
+                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "The selected date range falls entirely on a weekend."}})
+
+        # 3. THEN, Check for Overlapping Leave Requests
+        overlapping_requests = LeaveRequest.objects.filter(
+            employee=employee,
+            status__in=['pending', 'approved'],
+            start_date__lte=end_date,
+            end_date__gte=start_date
+        ).exists()
+
+        if overlapping_requests:
+            return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "You already have an approved or pending leave request that overlaps with these dates."}})
+        
+        # If all checks pass, proceed...
+        leave_type = LeaveType.objects.get(name=leave_type_str)
+        
         leave_request = LeaveRequest.objects.create(
             employee=employee,
             leave_type=leave_type,
@@ -143,35 +167,27 @@ def handle_modal_submission(payload):
             end_date=end_date,
             reason=reason,
         )
-
-        # --- Create an audit trail record ---
-        LeaveRequestAudit.objects.create(
-            leave_request=leave_request,
-            action="created",
-            performed_by=employee
-        )
+        LeaveRequestAudit.objects.create(leave_request=leave_request, action="created", performed_by=employee)
         logger.info(f"Leave Request #{leave_request.id} created for {employee.name}")
 
-        # --- Notify Manager ---
         send_approval_request(leave_request)
-        
-        # --- Confirm to User ---
-        slack_client.chat_postMessage(
-            channel=employee.slack_user_id,
-            text=f"Your leave request for *{leave_type.name}* from {start_date} to {end_date} has been submitted successfully."
-        )
-
+        slack_client.chat_postMessage(channel=employee.slack_user_id, text=f"Your leave request for *{leave_type.name}* from {start_date} to {end_date} has been submitted successfully.")
         return HttpResponse(status=200)
 
+    except Employee.DoesNotExist:
+        return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Your user profile was not found in the system. Please contact admin."}})
+    except LeaveType.DoesNotExist:
+        return JsonResponse({"response_action": "errors", "errors": {"leave_type_block": f"The selected leave type '{leave_type_str}' is not valid."}})
     except Exception as e:
         logger.error(f"Error handling modal submission: {e}")
-        # Return a generic error in the modal
         return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "A server error occurred. Please try again."}})
+
 
 @transaction.atomic
 def handle_button_actions(payload):
     """
-    Handles manager's approval or rejection button clicks.
+    --- UPDATED LOGIC ---
+    Handles manager's approval/rejection and posts public announcement on approval.
     """
     try:
         user_info = payload["user"]
@@ -179,26 +195,21 @@ def handle_button_actions(payload):
         request_id = int(action["value"])
         action_id = action["action_id"]
 
-        # Get the manager who clicked the button from our Employee database
-        manager, _ = Employee.objects.get_or_create(
-            slack_user_id=user_info["id"],
-            defaults={"name": user_info["username"], "email": f"{user_info['username']}@example.com"}
-        )
-
+        manager, _ = Employee.objects.get_or_create(slack_user_id=user_info["id"], defaults={"name": user_info["username"], "email": f"{user_info['username']}@example.com"})
         leave_request = LeaveRequest.objects.get(id=request_id)
         
-        # Check if the request is still pending
         if leave_request.status != 'pending':
-            slack_client.chat_postMessage(
-                channel=manager.slack_user_id,
-                text=f"This leave request for {leave_request.employee.name} has already been actioned."
-            )
+            slack_client.chat_postMessage(channel=manager.slack_user_id, text=f"This leave request for {leave_request.employee.name} has already been actioned.")
             return HttpResponse(status=200)
 
-        # Update status and create audit log
+        status_text = ""
         if action_id == "approve_leave":
             leave_request.status = "approved"
             status_text = "approved"
+            
+            # --- NEW: POST PUBLIC ANNOUNCEMENT ON APPROVAL ---
+            post_public_announcement(leave_request)
+
         elif action_id == "reject_leave":
             leave_request.status = "rejected"
             status_text = "rejected"
@@ -208,19 +219,11 @@ def handle_button_actions(payload):
         leave_request.approver = manager
         leave_request.save()
 
-        LeaveRequestAudit.objects.create(
-            leave_request=leave_request,
-            action=status_text,
-            performed_by=manager
-        )
+        LeaveRequestAudit.objects.create(leave_request=leave_request, action=status_text, performed_by=manager)
         logger.info(f"Leave Request #{leave_request.id} {status_text} by {manager.name}")
         
-        # Update the original message to show the final status
         update_approval_message(leave_request)
-        
-        # Notify the employee who originally made the request
         notify_employee(leave_request)
-
         return HttpResponse(status=200)
 
     except LeaveRequest.DoesNotExist:
@@ -245,7 +248,7 @@ def send_approval_request(leave_request):
     if employee.manager:
         destination_channel = employee.manager.slack_user_id
     else:
-        destination_channel = os.getenv("SLACK_MANAGEMENT_CHANNEL")
+        destination_channel = os.getenv("SLACK_REQUEST_CHANNEL")
         logger.warning(f"No manager for {employee.name}, sending to fallback channel {destination_channel}")
 
     if not destination_channel:
@@ -323,3 +326,26 @@ def notify_employee(leave_request):
         )
     except SlackApiError as e:
         logger.error(f"Error sending employee notification DM: {e.response['error']}")
+
+def post_public_announcement(leave_request: LeaveRequest):
+    """
+    Posts a public message about an approved leave to a general channel.
+    """
+    channel_id = os.getenv("SLACK_REQUEST_CHANNEL") # Using the variable name you specified
+    if not channel_id:
+        logger.warning("SLACK_REQUEST_CHANNEL not set. Skipping public announcement.")
+        return
+
+    employee_name = leave_request.employee.name
+    start_date = leave_request.start_date.strftime('%B %d')
+    end_date = leave_request.end_date.strftime('%B %d')
+    
+    message = f"FYI: {employee_name} will be on leave from {start_date} to {end_date}."
+    if leave_request.start_date == leave_request.end_date:
+        message = f"FYI: {employee_name} will be on leave on {start_date}."
+
+    try:
+        slack_client.chat_postMessage(channel=channel_id, text=message)
+        logger.info(f"Posted public announcement for leave request #{leave_request.id}")
+    except SlackApiError as e:
+        logger.error(f"Error posting public announcement: {e.response['error']}")

@@ -12,7 +12,7 @@ SECRET_KEY = '3s46c_-r!p6jh#+q_u7!gwy+6hycu7*2_ofy0jq$r@a)=h_hou'
 DEBUG=True
 ALLOWED_HOSTS = [    "127.0.0.1",
     "localhost",
-    "f9a8222011c6.ngrok-free.app",]
+    "27b68883239b.ngrok-free.app",]
 
 
 #Slack settings
