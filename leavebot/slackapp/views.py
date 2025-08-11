@@ -119,9 +119,22 @@ def handle_modal_submission(payload):
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
 
 
-        # 1. Basic Date Sanity Checks
-        if start_date < date.today():
-            return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Leave requests cannot be for a date in the past."}})
+        # 1. Conditional Past Date & Current Month Check
+        today = date.today()
+        is_unplanned = leave_type_str in ["Unplanned", "Emergency"]
+
+        if is_unplanned:
+            # Rule for unplanned leave: Must be in the past, but not more than 30 days ago.
+            thirty_days_ago = today - timedelta(days=30)
+            if start_date > today:
+                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Unplanned leave must be for a date in the past."}})
+            if start_date < thirty_days_ago:
+                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Unplanned leave can only be submitted for up to 30 days in the past."}})
+        else:
+            # Rule for normal leave: Must be for today or a future date.
+            if start_date < today:
+                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "This leave type is for planned leave and cannot be for a past date."}})
+
         if end_date < start_date:
             return JsonResponse({"response_action": "errors", "errors": {"end_date_block": "End date cannot be before the start date."}})
         
@@ -262,10 +275,9 @@ def handle_button_actions(payload):
         status_text = ""
         if action_id == "approve_leave":
             leave_request.status = "approved"
-            status_text = "approved"
-            
-
-            post_public_announcement(leave_request)
+            # --- NEW: ONLY POST ANNOUNCEMENT FOR PLANNED LEAVE ---
+            if leave_request.leave_type.name not in ["Unplanned", "Emergency"]:
+                post_public_announcement(leave_request)
 
         elif action_id == "reject_leave":
             leave_request.status = "rejected"

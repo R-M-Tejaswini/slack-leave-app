@@ -109,6 +109,7 @@ def get_approval_message_blocks(leave_request: LeaveRequest, is_completed=False)
     """
     Generate Slack blocks for the leave approval message sent to managers.
     This function is updated to use the new relational models.
+    This version includes custom wording for unplanned, retrospective leave types.
 
     Args:
         leave_request: The LeaveRequest model instance.
@@ -118,6 +119,14 @@ def get_approval_message_blocks(leave_request: LeaveRequest, is_completed=False)
     employee_name = leave_request.employee.name
     slack_user_id = leave_request.employee.slack_user_id
     leave_type_name = leave_request.leave_type.name
+    
+    # Check if the leave type is retrospective
+    is_unplanned = leave_type_name in ["Unplanned", "Emergency"]
+    
+    # Adjust title and date label based on the leave type
+    title_text = "Retrospective Leave Submission" if is_unplanned else "New Leave Request"
+    date_label = "Dates of Leave" if is_unplanned else "Dates"
+    submitted_label = "Submitted"
     duration = f"{leave_request.start_date}"
     if leave_request.end_date != leave_request.start_date:
         duration = f"{leave_request.start_date} to {leave_request.end_date}"
