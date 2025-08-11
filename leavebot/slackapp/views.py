@@ -13,10 +13,11 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from django.http import JsonResponse 
 
 from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit, Holiday
 from .utils import verify_slack_request
-from .slack_blocks import get_leave_form_modal, get_approval_message_blocks
+from .slack_blocks import get_leave_form_modal, get_approval_message_blocks, get_selection_modal,get_update_form_modal
 from .tasks import send_manager_reminder
 
 # --- Initialization ---
@@ -41,6 +42,7 @@ def slash_command(request):
             return JsonResponse({"error": "Invalid request"}, status=403)
 
         command_data = urllib.parse.parse_qs(request.body.decode())
+        command = command_data.get("command", [None])[0]
         trigger_id = command_data.get("trigger_id", [None])[0]
         user_id = command_data.get("user_id", [None])[0]
         user_name = command_data.get("user_name", [None])[0]
@@ -50,24 +52,44 @@ def slash_command(request):
 
         # Proactively create the Employee record if it doesn't exist
         # This ensures any user who uses the command is in our system.
-        Employee.objects.get_or_create(
+        employee, _ = Employee.objects.get_or_create(
             slack_user_id=user_id, defaults={"name": user_name, "email": f"{user_name}@example.com"}
         )
 
         logger.info(f"Slash command received from user {user_name} ({user_id})")
         
-        # NOTE: You may need to update get_leave_form_modal if it needs dynamic data
-        modal_view = get_leave_form_modal()
-        slack_client.views_open(trigger_id=trigger_id, view=modal_view)
+# --- COMMAND ROUTING ---
+        if command == "/applyleave":
+            modal_view = get_leave_form_modal()
+            slack_client.views_open(trigger_id=trigger_id, view=modal_view)
+        
+        elif command in ["/update_leave", "/cancel_leave"]:
+            # Find all pending requests for this user
+            pending_requests = LeaveRequest.objects.filter(employee=employee, status='pending').order_by('start_date')
+            
+            if not pending_requests.exists():
+                slack_client.chat_postEphemeral(
+                    channel=user_id,
+                    user=user_id,
+                    text="You have no pending leave requests to modify."
+                )
+                return HttpResponse(status=200)
+
+            # Determine which action is being taken
+            action_type = "update" if command == "/update_leave" else "cancel"
+            
+            # Use a generic selection modal for both actions
+            modal_view = get_selection_modal(pending_requests, action_type)
+            slack_client.views_open(trigger_id=trigger_id, view=modal_view)
 
         return HttpResponse(status=200)
 
     except SlackApiError as e:
-        logger.error(f"Error opening modal: {e.response['error']}")
+        logger.error(f"Error in slash_command: {e.response['error']}")
         return HttpResponse(f"Error: {e.response['error']}")
     except Exception as e:
         logger.error(f"Error in slash_command: {e}")
-        return HttpResponse("An unexpected error occurred. Please try again.")
+        return HttpResponse("An unexpected error occurred.")
 
 @csrf_exempt
 @require_POST
@@ -84,12 +106,32 @@ def interactions(request):
         interaction_type = payload.get("type")
 
         if interaction_type == "view_submission":
-            return handle_modal_submission(payload)
+            callback_id = payload["view"]["callback_id"]
+            print(f"--- DEBUG: Received callback_id: '{callback_id}' ---") 
+
+            if callback_id == "leave_request_modal":
+                return handle_modal_submission(payload)
+            # --- NEW: Handle cancel submission ---
+            elif callback_id == "cancel_leave_submission":
+                return handle_cancel_submission(payload)
+            # --- NEW: Handle update form submission ---
+            elif callback_id == "leave_update_modal_submission":
+                return handle_update_submission(payload)
+            elif callback_id == "select_leave_to_update": 
+                return handle_update_selection(payload) 
+                
         elif interaction_type == "block_actions":
-            return handle_button_actions(payload)
-        else:
-            logger.warning(f"Unhandled interaction type: {interaction_type}")
-            return HttpResponse(status=200)
+            action_id = payload["actions"][0]["action_id"]
+            # --- NEW: Handle selecting a request to update ---
+            if action_id == "request_select_action":
+                return handle_update_selection(payload)
+            else:
+                 # This handles approve/reject/who-else-is-off
+                return handle_button_actions(payload)
+        
+        logger.warning(f"Unhandled interaction type or callback_id: {interaction_type}")
+        return HttpResponse(status=200)
+
 
     except Exception as e:
         logger.error(f"Error in interactions view: {e}")
@@ -98,6 +140,214 @@ def interactions(request):
 # ==============================================================================
 # 2. Interaction Handlers (The core logic of app)
 # ==============================================================================
+
+def validate_leave_request(employee, start_date, end_date, leave_type_str, leave_request_to_exclude=None):
+    """
+    A reusable function to validate leave request data.
+    Returns a JsonResponse with an error if validation fails, otherwise returns None.
+    
+    Args:
+        employee: The Employee object making the request.
+        start_date: The proposed start date.
+        end_date: The proposed end date.
+        leave_type_str: The name of the leave type.
+        leave_request_to_exclude: An optional LeaveRequest object to exclude from overlap/balance checks.
+                                  This is used when updating an existing request.
+    """
+    # 1. Conditional Past Date Check
+    today = date.today()
+    is_unplanned = leave_type_str in ["Unplanned", "Emergency"]
+    if is_unplanned:
+        thirty_days_ago = today - timedelta(days=30)
+        if start_date > today:
+            return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Unplanned leave must be for a date in the past."}})
+        if start_date < thirty_days_ago:
+            return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Unplanned leave can only be submitted for up to 30 days in the past."}})
+    else:
+        if start_date < today:
+            return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Planned leave cannot be for a past date."}})
+
+    if end_date < start_date:
+        return JsonResponse({"response_action": "errors", "errors": {"end_date_block": "End date cannot be before the start date."}})
+
+    # 2. Check for Weekends and Holidays
+    holidays = set(Holiday.objects.filter(date__range=[start_date, end_date]).values_list('date', flat=True))
+    requested_days = 0
+    current_date_iterator = start_date
+    while current_date_iterator <= end_date:
+        if current_date_iterator.weekday() < 5 and current_date_iterator not in holidays:
+            requested_days += 1
+        current_date_iterator += timedelta(days=1)
+    
+    if requested_days == 0:
+        return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "The selected date range falls entirely on a weekend or holiday."}})
+
+    # 3. Check for Overlapping Leave Requests
+    overlapping_query = LeaveRequest.objects.filter(
+        employee=employee,
+        status__in=['pending', 'approved'],
+        start_date__lte=end_date,
+        end_date__gte=start_date
+    )
+    if leave_request_to_exclude:
+        overlapping_query = overlapping_query.exclude(id=leave_request_to_exclude.id)
+    
+    if overlapping_query.exists():
+        return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "You have an overlapping leave request for these dates."}})
+
+    # 4. Check Monthly Leave Allowance
+    month_start = start_date.replace(day=1)
+    requests_this_month_query = LeaveRequest.objects.filter(
+        employee=employee,
+        status__in=['pending', 'approved'],
+        start_date__year=month_start.year,
+        start_date__month=month_start.month
+    )
+    if leave_request_to_exclude:
+        requests_this_month_query = requests_this_month_query.exclude(id=leave_request_to_exclude.id)
+        
+    days_taken_this_month = sum(req.duration_days for req in requests_this_month_query)
+    remaining_allowance = employee.monthly_leave_allowance - days_taken_this_month
+
+    if requested_days > remaining_allowance:
+        return JsonResponse({
+            "response_action": "errors",
+            "errors": {
+                "start_date_block": (
+                    f"You are requesting {requested_days} days, but only have {remaining_allowance} days left this month."
+                )
+            }
+        })
+    
+    # All checks passed
+    return None
+
+@transaction.atomic
+
+
+
+def handle_update_selection(payload):
+    """
+    Handles the user selecting a leave request.
+    It now updates the modal using a direct JSON response.
+    """
+    try:
+        # Get the ID of the leave request the user selected from the dropdown.
+        values = payload["view"]["state"]["values"]
+        selected_request_id = values["request_selection_block"]["request_select_action"]["selected_option"]["value"]
+        
+        # Fetch the full LeaveRequest object from the database.
+        leave_request = LeaveRequest.objects.get(id=int(selected_request_id))
+        
+        # Build the new modal view, pre-filled with the request's data.
+        update_modal_view = get_update_form_modal(leave_request)
+        
+        # --- THE FIX IS HERE ---
+        # Instead of calling slack_client, return a JSON response
+        # that tells Slack to update the view directly.
+        return JsonResponse({
+            "response_action": "update",
+            "view": update_modal_view
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in handle_update_selection: {e}")
+        # In case of an error, it's good practice to close the modal.
+        return JsonResponse({"response_action": "clear"})
+
+
+@transaction.atomic
+def handle_cancel_submission(payload):
+    """
+    Handles the final confirmation for cancelling a leave request.
+    """
+    try:
+        values = payload["view"]["state"]["values"]
+        request_id = int(values["request_selection_block"]["request_select_action"]["selected_option"]["value"])
+        
+        leave_request = LeaveRequest.objects.get(id=request_id)
+        
+        # Only allow cancelling pending requests
+        if leave_request.status != 'pending':
+            slack_client.chat_postMessage(channel=leave_request.employee.slack_user_id, text="This request cannot be cancelled as it has already been actioned by your manager.")
+            return HttpResponse(status=200)
+            
+        leave_request.status = 'cancelled'
+        leave_request.save(update_fields=['status'])
+        
+        # Log the action
+        LeaveRequestAudit.objects.create(leave_request=leave_request, action="cancelled", performed_by=leave_request.employee)
+        logger.info(f"Leave Request #{leave_request.id} cancelled by employee.")
+
+        # Update the manager's message and notify the employee
+        update_approval_message(leave_request, is_cancelled=True)
+        slack_client.chat_postMessage(channel=leave_request.employee.slack_user_id, text=f"Your leave request for {leave_request.start_date} to {leave_request.end_date} has been successfully cancelled.")
+        
+        return HttpResponse(status=200)
+
+    except LeaveRequest.DoesNotExist:
+        # This shouldn't happen in normal flow, but good to have
+        logger.error(f"Attempt to cancel non-existent leave request.")
+        return HttpResponse("Error: The request you tried to cancel was not found.", status=404)
+    except Exception as e:
+        logger.error(f"Error in handle_cancel_submission: {e}")
+        return HttpResponse("An error occurred while cancelling the request.", status=500)
+
+@transaction.atomic
+def handle_update_submission(payload):
+    """
+    Handles the submission of the updated leave request form.
+    This function re-validates the new data and saves the changes.
+    """
+    try:
+        # Retrieve the request_id from the private_metadata
+        private_metadata = json.loads(payload["view"]["private_metadata"])
+        request_id = private_metadata["leave_request_id"]
+        
+        leave_request = LeaveRequest.objects.get(id=request_id)
+        employee = leave_request.employee
+        
+        # Extract new values from the form
+        values = payload["view"]["state"]["values"]
+        start_date_str = values["start_date_block"]["start_date_input"]["selected_date"]
+        end_date_str = values["end_date_block"]["end_date_input"]["selected_date"]
+        leave_type_str = values["leave_type_block"]["leave_type_select"]["selected_option"]["value"]
+        reason = values["reason_block"]["reason_input"]["value"] or ""
+
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+
+        # --- IMPORTANT: Re-run validation logic, excluding the current request from checks ---
+        validation_error = validate_leave_request(
+            employee, start_date, end_date, leave_type_str, leave_request_to_exclude=leave_request
+        )
+        if validation_error:
+            return validation_error
+        # ------------------------------------------------------------------------------------
+        
+        # Update the LeaveRequest object
+        leave_request.start_date = start_date
+        leave_request.end_date = end_date
+        leave_request.leave_type = LeaveType.objects.get(name=leave_type_str)
+        leave_request.reason = reason
+        leave_request.save()
+
+        # Log the update
+        LeaveRequestAudit.objects.create(leave_request=leave_request, action="updated", performed_by=employee)
+        logger.info(f"Leave Request #{leave_request.id} updated by employee.")
+
+        # Update the manager's message and notify the employee
+        update_approval_message(leave_request, is_updated=True)
+        slack_client.chat_postMessage(channel=employee.slack_user_id, text=f"Your leave request for {leave_request.start_date} to {leave_request.end_date} has been successfully updated.")
+        
+        return HttpResponse(status=200)
+
+    except LeaveRequest.DoesNotExist:
+        return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "The original leave request was not found."}})
+    except Exception as e:
+        logger.error(f"Error handling update submission: {e}")
+        return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "A server error occurred during the update."}})
+
 
 @transaction.atomic
 def handle_modal_submission(payload):
@@ -119,86 +369,9 @@ def handle_modal_submission(payload):
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
 
 
-        # 1. Conditional Past Date & Current Month Check
-        today = date.today()
-        is_unplanned = leave_type_str in ["Unplanned", "Emergency"]
-
-        if is_unplanned:
-            # Rule for unplanned leave: Must be in the past, but not more than 30 days ago.
-            thirty_days_ago = today - timedelta(days=30)
-            if start_date > today:
-                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Unplanned leave must be for a date in the past."}})
-            if start_date < thirty_days_ago:
-                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "Unplanned leave can only be submitted for up to 30 days in the past."}})
-        else:
-            # Rule for normal leave: Must be for today or a future date.
-            if start_date < today:
-                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "This leave type is for planned leave and cannot be for a past date."}})
-
-        if end_date < start_date:
-            return JsonResponse({"response_action": "errors", "errors": {"end_date_block": "End date cannot be before the start date."}})
-        
-        # 2. Check for Weekends and Holidays FIRST
-        holidays = set(Holiday.objects.filter(date__range=[start_date, end_date]).values_list('date', flat=True))
-        requested_days = 0
-        is_range_a_holiday = False
-        
-        current_date_iterator = start_date
-        while current_date_iterator <= end_date:
-            if current_date_iterator.weekday() < 5:
-                if current_date_iterator not in holidays:
-                    requested_days += 1
-                else:
-                    is_range_a_holiday = True
-            current_date_iterator += timedelta(days=1)
-        
-        if requested_days == 0:
-            if is_range_a_holiday:
-                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "The selected date range falls on a company holiday."}})
-            else:
-                return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "The selected date range falls entirely on a weekend."}})
-
-        # 3. THEN, Check for Overlapping Leave Requests
-        overlapping_requests = LeaveRequest.objects.filter(
-            employee=employee,
-            status__in=['pending', 'approved'],
-            start_date__lte=end_date,
-            end_date__gte=start_date
-        ).exists()
-
-        if overlapping_requests:
-            return JsonResponse({"response_action": "errors", "errors": {"start_date_block": "You already have an approved or pending leave request that overlaps with these dates."}})
-        
-
-        # Find all approved/pending leaves for the employee in the month of the start date
-        month_start = start_date.replace(day=1)
-        
-        # Get all approved/pending requests that start in the same month and year
-        requests_this_month = LeaveRequest.objects.filter(
-            employee=employee,
-            status__in=['pending', 'approved'],
-            start_date__year=month_start.year,
-            start_date__month=month_start.month
-        )
-        
-        # Calculate days already taken/requested this month
-        days_taken_this_month = 0
-        for req in requests_this_month:
-            days_taken_this_month += req.duration_days
-        
-        allowance = employee.monthly_leave_allowance
-        remaining_allowance = allowance - days_taken_this_month
-
-        if requested_days > remaining_allowance:
-            return JsonResponse({
-                "response_action": "errors",
-                "errors": {
-                    "start_date_block": (
-                        f"You have exceeded your monthly allowance. "
-                        f"You have {remaining_allowance} days left this month but are requesting {requested_days}."
-                    )
-                }
-            })
+        validation_error = validate_leave_request(employee, start_date, end_date, leave_type_str)
+        if validation_error:
+            return validation_error
 
         
         # If all checks pass, proceed...
@@ -348,34 +521,39 @@ def send_approval_request(leave_request):
         print("="*60 + "\n")
         logger.error(f"Error sending approval request DM: {e.response['error']}")
 
-def update_approval_message(leave_request: LeaveRequest):
+def update_approval_message(leave_request: LeaveRequest, is_updated=False, is_cancelled=False):
     """
-
-    Updates the original manager's message to show the final status, removing
-    the action buttons to prevent duplicate actions.
+    Updates the original manager's message to show the final status.
+    Now passes flags for updated or cancelled states.
     """
-
-    # If we don't have a channel and message ID, we can't update anything.
     if not (leave_request.slack_channel_id and leave_request.slack_message_ts):
         logger.error(f"Missing channel or timestamp for LeaveRequest #{leave_request.id}, cannot update approval message.")
         return
 
     try:
-        # Get the blocks for the completed state
-        blocks = get_approval_message_blocks(leave_request, is_completed=True)
-
-
+        # Determine the final state to generate the correct blocks
+        is_completed = leave_request.status in ['approved', 'rejected']
         
-        # Use the saved channel_id and message_ts for the update
+        blocks = get_approval_message_blocks(
+            leave_request, 
+            is_completed=is_completed, 
+            is_updated=is_updated, 
+            is_cancelled=is_cancelled
+        )
+        
+        text = f"Leave request for {leave_request.employee.name} has been {leave_request.status}."
+        if is_updated:
+            text = f"Leave request for {leave_request.employee.name} has been updated."
+        elif is_cancelled:
+            text = f"Leave request for {leave_request.employee.name} has been cancelled."
+            
         slack_client.chat_update(
             channel=leave_request.slack_channel_id,
             ts=leave_request.slack_message_ts,
-            text=f"Leave request for {leave_request.employee.name} has been {leave_request.status}.",
+            text=text,
             blocks=blocks
         )
     except SlackApiError as e:
-        # This is where the 'message_not_found' error was happening.
-        # It should now be resolved.
         logger.error(f"Error updating approval message: {e.response['error']}")
 
 

@@ -14,7 +14,7 @@ class Team(models.Model):
 
     def __str__(self):
         return self.name
-        
+
 class Employee(models.Model):
     """
     Represents an employee in the system, linking their Slack identity to their
