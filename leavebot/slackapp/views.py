@@ -279,6 +279,13 @@ def handle_cancel_submission(payload):
         LeaveRequestAudit.objects.create(leave_request=leave_request, action="cancelled", performed_by=leave_request.employee)
         logger.info(f"Leave Request #{leave_request.id} cancelled by employee.")
 
+        if leave_request.slack_channel_id and leave_request.slack_message_ts:
+            slack_client.chat_postMessage(
+                channel=leave_request.slack_channel_id,
+                thread_ts=leave_request.slack_message_ts,  # This makes it a threaded reply
+                text=f"ℹ️ This leave request was cancelled by {leave_request.employee.name}."
+            )
+
         # Update the manager's message and notify the employee
         update_approval_message(leave_request, is_cancelled=True)
         slack_client.chat_postMessage(channel=leave_request.employee.slack_user_id, text=f"Your leave request for {leave_request.start_date} to {leave_request.end_date} has been successfully cancelled.")
@@ -317,7 +324,7 @@ def handle_update_submission(payload):
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
 
-        # --- IMPORTANT: Re-run validation logic, excluding the current request from checks ---
+       
         validation_error = validate_leave_request(
             employee, start_date, end_date, leave_type_str, leave_request_to_exclude=leave_request
         )
@@ -335,6 +342,13 @@ def handle_update_submission(payload):
         # Log the update
         LeaveRequestAudit.objects.create(leave_request=leave_request, action="updated", performed_by=employee)
         logger.info(f"Leave Request #{leave_request.id} updated by employee.")
+
+        if leave_request.slack_channel_id and leave_request.slack_message_ts:
+            slack_client.chat_postMessage(
+                channel=leave_request.slack_channel_id,
+                thread_ts=leave_request.slack_message_ts, # This makes it a threaded reply
+                text=f"ℹ️ This leave request was updated by {leave_request.employee.name}. Please review the new details above."
+            )
 
         # Update the manager's message and notify the employee
         update_approval_message(leave_request, is_updated=True)
