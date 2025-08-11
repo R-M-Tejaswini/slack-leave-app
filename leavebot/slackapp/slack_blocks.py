@@ -115,8 +115,6 @@ def get_approval_message_blocks(leave_request: LeaveRequest, is_completed=False)
         is_completed: If True, shows the final status instead of action buttons.
     """
     # --- Access data through relationships ---
-    # OLD: leave_request.user_name -> NEW: leave_request.employee.name
-    # OLD: leave_request.leave_type -> NEW: leave_request.leave_type.name
     employee_name = leave_request.employee.name
     slack_user_id = leave_request.employee.slack_user_id
     leave_type_name = leave_request.leave_type.name
@@ -147,7 +145,6 @@ def get_approval_message_blocks(leave_request: LeaveRequest, is_completed=False)
             "text": {"type": "mrkdwn", "text": f"*Reason:* {leave_request.reason}"}
         })
     
-    # --- Simplified logic for status vs. buttons ---
     if is_completed:
         # If the request is approved or rejected, show the final status
         status_emoji = "✅" if leave_request.status == "approved" else "❌"
@@ -179,7 +176,15 @@ def get_approval_message_blocks(leave_request: LeaveRequest, is_completed=False)
                         "style": "danger",
                         "action_id": "reject_leave",
                         "value": str(leave_request.id) # Pass the request ID
+                    },
+
+                    {
+                        "type": "button", 
+                        "text": {"type": "plain_text", "text": "Who else is off?"}, 
+                        "action_id": "view_overlapping_leave", 
+                        "value": str(leave_request.id)
                     }
+
                 ]
             }
         ])

@@ -231,6 +231,29 @@ def handle_button_actions(payload):
 
         manager, _ = Employee.objects.get_or_create(slack_user_id=user_info["id"], defaults={"name": user_info["username"], "email": f"{user_info['username']}@example.com"})
         leave_request = LeaveRequest.objects.get(id=request_id)
+
+        if action_id == "view_overlapping_leave":
+            # Find other approved leaves that overlap with this request's dates.
+            # Exclude the current request's employee from the search.
+            overlapping_leaves = LeaveRequest.objects.filter(
+                status='approved',
+                start_date__lte=leave_request.end_date,
+                end_date__gte=leave_request.start_date
+            ).exclude(employee=leave_request.employee)
+            
+            if overlapping_leaves.exists():
+                names = ", ".join([lr.employee.name for lr in overlapping_leaves])
+                message = f"ℹ️ The following team members also have approved leave during this period: *{names}*."
+            else:
+                message = "ℹ️ No other team members have approved leave during this period."
+            
+            # Post an ephemeral message, which is only visible to the manager who clicked.
+            slack_client.chat_postEphemeral(
+                channel=payload["channel"]["id"],
+                user=manager.slack_user_id,
+                text=message
+            )
+            return HttpResponse(status=200)
         
         if leave_request.status != 'pending':
             slack_client.chat_postMessage(channel=manager.slack_user_id, text=f"This leave request for {leave_request.employee.name} has already been actioned.")
@@ -365,16 +388,30 @@ def notify_employee(leave_request):
 
 def post_public_announcement(leave_request: LeaveRequest):
     """
-    Posts a public, privacy-conscious announcement about an approved leave
-    to a designated company-wide channel.
+    Posts a public message about an approved leave.
+    
+    It first tries to post to the employee's designated team channel.
+    If no team channel is configured, it falls back to the common
+    SLACK_REQUEST_CHANNEL defined in the .env file.
     """
+    employee = leave_request.employee
+    channel_id = None
 
-    channel_id = os.getenv("SLACK_REQUEST_CHANNEL") # Using the variable name you specified
+    # 1. Try to get the specific team channel first.
+    if employee.team and employee.team.slack_channel_id:
+        channel_id = employee.team.slack_channel_id
+    else:
+        # 2. If not found, fall back to the common channel.
+        logger.warning(f"No team channel for {employee.name}. Falling back to common announcement channel.")
+        channel_id = os.getenv("SLACK_REQUEST_CHANNEL")
+
+    # 3. If neither channel is configured, skip the announcement.
     if not channel_id:
-        logger.warning("SLACK_REQUEST_CHANNEL not set. Skipping public announcement.")
+        logger.error("No team channel or fallback SLACK_REQUEST_CHANNEL is configured. Skipping announcement.")
         return
-
-    employee_name = leave_request.employee.name
+    
+    # Format the message (no changes here)
+    employee_name = employee.name
     start_date = leave_request.start_date.strftime('%B %d')
     end_date = leave_request.end_date.strftime('%B %d')
     
@@ -382,8 +419,9 @@ def post_public_announcement(leave_request: LeaveRequest):
     if leave_request.start_date == leave_request.end_date:
         message = f"FYI: {employee_name} will be on leave on {start_date}."
 
+    # Post the message to the determined channel
     try:
         slack_client.chat_postMessage(channel=channel_id, text=message)
-        logger.info(f"Posted public announcement for leave request #{leave_request.id}")
+        logger.info(f"Posted announcement for leave request #{leave_request.id} to channel {channel_id}")
     except SlackApiError as e:
-        logger.error(f"Error posting public announcement: {e.response['error']}")
+        logger.error(f"Error posting announcement to channel {channel_id}: {e.response['error']}")

@@ -7,6 +7,14 @@ from datetime import datetime, timedelta
 # CORE DATA MODELS
 # ==============================================================================
 
+class Team(models.Model):
+    """Represents a team within the organization, with a dedicated Slack channel."""
+    name = models.CharField(max_length=100, unique=True)
+    slack_channel_id = models.CharField(max_length=50, help_text="The Slack Channel ID for this team's announcements.")
+
+    def __str__(self):
+        return self.name
+        
 class Employee(models.Model):
     """
     Represents an employee in the system, linking their Slack identity to their
@@ -23,12 +31,14 @@ class Employee(models.Model):
         related_name='direct_reports',
         help_text="The direct manager of this employee"
     )
+    team = models.ForeignKey(Team, on_delete=models.SET_NULL, null=True, blank=True)
     monthly_leave_allowance = models.PositiveSmallIntegerField(default=2, help_text="Number of leave days allowed per month")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"{self.name} ({self.slack_user_id})"
+
 
 class LeaveType(models.Model):
     """
