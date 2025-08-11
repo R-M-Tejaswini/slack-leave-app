@@ -330,7 +330,6 @@ def handle_update_submission(payload):
         )
         if validation_error:
             return validation_error
-        # ------------------------------------------------------------------------------------
         
         # Update the LeaveRequest object
         leave_request.start_date = start_date
@@ -434,7 +433,6 @@ def handle_button_actions(payload):
 
         if action_id == "view_overlapping_leave":
             # Find other approved leaves that overlap with this request's dates.
-            # Exclude the current request's employee from the search.
             overlapping_leaves = LeaveRequest.objects.filter(
                 status='approved',
                 start_date__lte=leave_request.end_date,
@@ -447,11 +445,12 @@ def handle_button_actions(payload):
             else:
                 message = "ℹ️ No other team members have approved leave during this period."
             
-            # Post an ephemeral message, which is only visible to the manager who clicked.
+            # Post an ephemeral message IN THE THREAD, visible only to the manager.
             slack_client.chat_postEphemeral(
                 channel=payload["channel"]["id"],
                 user=manager.slack_user_id,
-                text=message
+                text=message,
+                thread_ts=leave_request.slack_message_ts  # <-- This is the key change
             )
             return HttpResponse(status=200)
         
