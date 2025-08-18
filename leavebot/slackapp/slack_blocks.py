@@ -1,5 +1,6 @@
 # leavebot/slackapp/slack_blocks.py
 from datetime import date, timedelta
+from calendar import month_name, monthrange
 from .models import LeaveType, LeaveRequest # Import the new models
 import json
 
@@ -353,4 +354,107 @@ def get_update_form_modal(leave_request: LeaveRequest):
                 "optional": False
             }
         ]
+    }
+
+# Add this new function to slack_blocks.py
+def get_calendar_view_modal(leave_requests, month_date, title: str, viewer_employee_id=None, summary_info=None):
+    """
+    Generates a reusable, interactive modal with a monthly calendar view.
+    Can optionally include a summary block for the employee view.
+
+    Args:
+        leave_requests: A queryset of LeaveRequest objects to display.
+        month_date: A date object for the month to display.
+        title (str): The title for the modal window.
+        viewer_employee_id: The ID of the employee viewing the calendar, used to highlight their own leaves.
+        summary_info (dict, optional): A dictionary with allowance data for the employee view.
+                                       Example: {'allowance': 2, 'remaining': 1}
+    """
+    blocks = []
+
+    # --- NEW: Conditionally add a summary block at the top ---
+    if summary_info:
+        summary_text = (
+            f"*Your Leave Summary for {month_name[month_date.month]} {month_date.year}*\n"
+            f"Monthly Allowance: *{summary_info['allowance']} days*\n"
+            f"Remaining This Month: *{summary_info['remaining']} days*"
+        )
+        blocks.extend([
+            {"type": "section", "text": {"type": "mrkdwn", "text": summary_text}},
+            {"type": "divider"}
+        ])
+
+    # 1. Group leave requests by the day they occur on.
+    leaves_by_day = {day: [] for day in range(1, 32)}
+    for req in leave_requests:
+        current_date = req.start_date
+        while current_date <= req.end_date:
+            if current_date.month == month_date.month:
+                leaves_by_day[current_date.day].append(req)
+            current_date += timedelta(days=1)
+
+    # 2. Build the calendar string week by week.
+    calendar_title = f"*{title} for {month_name[month_date.month]} {month_date.year}*\n"
+    weekly_blocks_text = []
+    current_week_lines = []
+    first_day_of_month, num_days = monthrange(month_date.year, month_date.month)
+
+    current_week_lines.extend([""] * first_day_of_month)
+
+    for day in range(1, num_days + 1):
+        weekday = (first_day_of_month + day - 1) % 7
+        day_name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday]
+        
+        line = f"*{day_name} {day:02d}:* "
+        
+        if weekday < 5: # It's a weekday
+            requests_for_day = leaves_by_day.get(day, [])
+            if requests_for_day:
+                day_entries = []
+                for req in requests_for_day:
+                    status_emoji = {
+                        'approved': '✅', 'rejected': '❌',
+                        'pending': '⏳', 'cancelled': '🗑️'
+                    }.get(req.status, '')
+                    
+                    name_display = f"_{req.employee.name}_"
+                    # Highlight the viewer's own leave in any view
+                    if viewer_employee_id and req.employee.id == viewer_employee_id:
+                        name_display = f"*{req.employee.name} (Your Leave)*"
+
+                    day_entries.append(f"{status_emoji} {name_display}")
+                line += ", ".join(day_entries)
+            else:
+                line += "▫️ Available"
+        else: # It's a weekend
+            line += "_(Weekend)_"
+        
+        current_week_lines.append(line)
+        
+        if weekday == 6 or day == num_days:
+            weekly_blocks_text.append("> " + "\n> ".join(filter(None, current_week_lines)))
+            current_week_lines = []
+
+    calendar_body = "\n\n".join(weekly_blocks_text)
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": calendar_title + calendar_body}})
+    
+    # 3. Create navigation buttons.
+    prev_month = (month_date.replace(day=1) - timedelta(days=1)).strftime('%Y-%m-%d')
+    next_month = (month_date.replace(day=28) + timedelta(days=4)).strftime('%Y-%m-01')
+
+    navigation_buttons = {
+        "type": "actions",
+        "elements": [
+            {"type": "button", "text": {"type": "plain_text", "text": "⬅️ Previous"}, "action_id": "navigate_calendar_prev", "value": prev_month},
+            {"type": "button", "text": {"type": "plain_text", "text": "Next ➡️"}, "action_id": "navigate_calendar_next", "value": next_month}
+        ]
+    }
+    blocks.extend([{"type": "divider"}, navigation_buttons])
+    
+    return {
+        "type": "modal",
+        "callback_id": "team_leave_calendar",
+        "title": {"type": "plain_text", "text": title},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks
     }
