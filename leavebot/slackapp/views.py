@@ -5,6 +5,7 @@ import logging
 import os
 import urllib.parse
 from datetime import datetime, date, timedelta
+import requests
 
 from django.db import transaction
 from django.db.models import Q 
@@ -17,7 +18,7 @@ from django.http import JsonResponse
 
 from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit, Holiday
 from .utils import verify_slack_request
-from .slack_blocks import get_leave_form_modal, get_approval_message_blocks, get_selection_modal,get_update_form_modal
+from .slack_blocks import get_leave_form_modal, get_approval_message_blocks, get_selection_modal,get_update_form_modal, get_calendar_view_modal
 from .tasks import send_manager_reminder
 
 # --- Initialization ---
@@ -46,6 +47,8 @@ def slash_command(request):
         trigger_id = command_data.get("trigger_id", [None])[0]
         user_id = command_data.get("user_id", [None])[0]
         user_name = command_data.get("user_name", [None])[0]
+        response_url = command_data.get("response_url", [None])[0]
+
 
         if not trigger_id or not user_id:
             return JsonResponse({"text": "Error: Missing user or trigger ID."})
@@ -62,6 +65,29 @@ def slash_command(request):
         if command == "/applyleave":
             modal_view = get_leave_form_modal()
             slack_client.views_open(trigger_id=trigger_id, view=modal_view)
+
+        elif command == '/my_leaves':
+            # --- EMPLOYEE CALENDAR VIEW ---
+            today = date.today()
+            
+            # 1. Calculate remaining allowance for the summary
+            requests_this_month = LeaveRequest.objects.filter(employee=employee, status__in=['pending', 'approved'], start_date__year=today.year, start_date__month=today.month)
+            days_taken_this_month = sum(req.duration_days for req in requests_this_month)
+            remaining_allowance = employee.monthly_leave_allowance - days_taken_this_month
+            
+            summary_info = {
+                "allowance": employee.monthly_leave_allowance,
+                "remaining": remaining_allowance
+            }
+
+            # 2. Get all of this employee's leaves for the current month to display
+            employee_leaves = LeaveRequest.objects.filter(employee=employee, start_date__year=today.year, start_date__month=today.month)
+            
+            # 3. Generate and open the calendar modal with the summary
+            calendar_modal = get_calendar_view_modal(employee_leaves, today, "My Leave Calendar", employee.id, summary_info)
+            slack_client.views_open(trigger_id=trigger_id, view=calendar_modal)
+
+
         
         elif command in ["/update_leave", "/cancel_leave"]:
             # Find all pending requests for this user
@@ -419,75 +445,75 @@ def handle_modal_submission(payload):
 
 @transaction.atomic
 def handle_button_actions(payload):
-    """
-    Handles a manager's approval or rejection action from a button click.
-    """
+    """Handles manager's actions, including the improved calendar view."""
     try:
         user_info = payload["user"]
         action = payload["actions"][0]
-        request_id = int(action["value"])
         action_id = action["action_id"]
+        manager = Employee.objects.get(slack_user_id=user_info["id"])
 
-        manager, _ = Employee.objects.get_or_create(slack_user_id=user_info["id"], defaults={"name": user_info["username"], "email": f"{user_info['username']}@example.com"})
-        leave_request = LeaveRequest.objects.get(id=request_id)
-
-        if action_id == "view_overlapping_leave":
-            # Find other approved leaves that overlap with this request's dates.
-            overlapping_leaves = LeaveRequest.objects.filter(
-                status='approved',
-                start_date__lte=leave_request.end_date,
-                end_date__gte=leave_request.start_date
-            ).exclude(employee=leave_request.employee)
+        # --- UNIFIED CALENDAR NAVIGATION ---
+        if action_id in ["navigate_calendar_prev", "navigate_calendar_next"]:
+            new_month_date = datetime.strptime(action["value"], "%Y-%m-%d").date()
+            original_title = payload["view"]["title"]["text"]
             
-            if overlapping_leaves.exists():
-                names = ", ".join([lr.employee.name for lr in overlapping_leaves])
-                message = f"ℹ️ The following team members also have approved leave during this period: *{names}*."
+            summary_info = None # Default to no summary for manager view
+            if "My Leave Calendar" in original_title:
+                # Employee is navigating their own calendar
+                leave_requests = LeaveRequest.objects.filter(employee=manager, start_date__year=new_month_date.year, start_date__month=new_month_date.month)
+                
+                # Recalculate summary for the new month
+                requests_in_new_month = leave_requests.filter(status__in=['pending', 'approved'])
+                days_taken = sum(req.duration_days for req in requests_in_new_month)
+                summary_info = {
+                    "allowance": manager.monthly_leave_allowance,
+                    "remaining": manager.monthly_leave_allowance - days_taken
+                }
             else:
-                message = "ℹ️ No other team members have approved leave during this period."
+                # Manager is navigating the team calendar
+                leave_requests = LeaveRequest.objects.filter(status='approved', start_date__year=new_month_date.year, start_date__month=new_month_date.month)
             
-            # Post an ephemeral message IN THE THREAD, visible only to the manager.
-            slack_client.chat_postEphemeral(
-                channel=payload["channel"]["id"],
-                user=manager.slack_user_id,
-                text=message,
-                thread_ts=leave_request.slack_message_ts  # <-- This is the key change
-            )
+            new_modal_view = get_calendar_view_modal(leave_requests, new_month_date, original_title, manager.id, summary_info)
+            slack_client.views_update(view_id=payload["view"]["id"], view=new_modal_view)
             return HttpResponse(status=200)
+
+        # --- MANAGER'S BUTTON ACTIONS ---
+        request_id = int(action["value"])
+        leave_request = LeaveRequest.objects.get(id=request_id)
         
+        if action_id == "view_overlapping_leave":
+            # --- MANAGER TEAM CALENDAR VIEW ---
+            month_date = leave_request.start_date
+            approved_leaves = LeaveRequest.objects.filter(status='approved', start_date__year=month_date.year, start_date__month=month_date.month)
+            # Open the calendar with NO summary info
+            calendar_modal = get_calendar_view_modal(approved_leaves, month_date, "Team Leave Calendar", manager.id, summary_info=None)
+            slack_client.views_open(trigger_id=payload["trigger_id"], view=calendar_modal)
+            return HttpResponse(status=200)
+
         if leave_request.status != 'pending':
             slack_client.chat_postMessage(channel=manager.slack_user_id, text=f"This leave request for {leave_request.employee.name} has already been actioned.")
             return HttpResponse(status=200)
 
-        status_text = ""
         if action_id == "approve_leave":
             leave_request.status = "approved"
-            # --- NEW: ONLY POST ANNOUNCEMENT FOR PLANNED LEAVE ---
             if leave_request.leave_type.name not in ["Unplanned", "Emergency"]:
                 post_public_announcement(leave_request)
-
         elif action_id == "reject_leave":
             leave_request.status = "rejected"
-            status_text = "rejected"
         else:
             return HttpResponse(status=400)
             
         leave_request.approver = manager
         leave_request.save()
 
-        LeaveRequestAudit.objects.create(leave_request=leave_request, action=status_text, performed_by=manager)
-        logger.info(f"Leave Request #{leave_request.id} {status_text} by {manager.name}")
-        
+        LeaveRequestAudit.objects.create(leave_request=leave_request, action=leave_request.status, performed_by=manager)
         update_approval_message(leave_request)
         notify_employee(leave_request)
         return HttpResponse(status=200)
 
-    except LeaveRequest.DoesNotExist:
-        logger.error("Leave request not found during button action.")
-        return HttpResponse("This leave request could not be found.", status=404)
     except Exception as e:
         logger.error(f"Error in handle_button_actions: {e}")
-        return HttpResponse("An error occurred.", status=500)
-
+        return HttpResponse("An error occurred.")
 # ==============================================================================
 # 3. Helper Functions (For sending and updating Slack messages)
 # ==============================================================================

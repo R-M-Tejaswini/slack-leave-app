@@ -29,7 +29,7 @@ DEBUG = os.getenv('DJANGO_DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = [
     "127.0.0.1",
     "localhost",
-    "34ff9202c30f.ngrok-free.app",  # Example for local development with ngrok
+    "357ecd79b8cd.ngrok-free.app",  # Example for local development with ngrok
     os.getenv('PRODUCTION_HOST'), # e.g., your ngrok URL or final domain
 ]
 

@@ -1,5 +1,6 @@
 # leavebot/slackapp/slack_blocks.py
 from datetime import date, timedelta
+from calendar import month_name, monthrange
 from .models import LeaveType, LeaveRequest # Import the new models
 import json
 
@@ -178,46 +179,31 @@ def get_approval_message_blocks(leave_request: LeaveRequest, is_completed=False,
     # This section is also from your original code.
     if is_completed:
         status_emoji = "✅" if leave_request.status == "approved" else "❌"
-        manager_name = leave_request.approver.name if leave_request.approver else "N/A"
+        manager_name = leave_request.approver.name if leave_request.approver else "System"
         status_text = f"{status_emoji} *{leave_request.status.title()}* by {manager_name}"
         
+        status_block = {"type": "section", "text": {"type": "mrkdwn", "text": status_text}}
+        
+        # --- THIS IS THE FIX: The status message now comes BEFORE the divider ---
         blocks.extend([
-            {"type": "divider"},
-            {"type": "section", "text": {"type": "mrkdwn", "text": status_text}}
+            status_block,
+            {"type": "divider"}
         ])
     else:
-        # If the request is pending, show the action buttons
+        action_buttons = {
+            "type": "actions",
+            "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve"}, "style": "primary", "action_id": "approve_leave", "value": str(leave_request.id)},
+                {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"}, "style": "danger", "action_id": "reject_leave", "value": str(leave_request.id)},
+                {"type": "button", "text": {"type": "plain_text", "text": "Who else is off?"}, "action_id": "view_overlapping_leave", "value": str(leave_request.id)}
+            ]
+        }
         blocks.extend([
-            {"type": "divider"},
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "✅ Approve"},
-                        "style": "primary",
-                        "action_id": "approve_leave",
-                        "value": str(leave_request.id)
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "❌ Reject"},
-                        "style": "danger",
-                        "action_id": "reject_leave",
-                        "value": str(leave_request.id)
-                    },
-                    {
-                        "type": "button", 
-                        "text": {"type": "plain_text", "text": "Who else is off?"}, 
-                        "action_id": "view_overlapping_leave", 
-                        "value": str(leave_request.id)
-                    }
-                ]
-            }
+            action_buttons,
+            {"type": "divider"}
         ])
     
     return blocks
-
 def get_selection_modal(pending_requests, action_type: str):
     """
     Creates a modal for selecting a pending leave request to update or cancel.
@@ -353,4 +339,107 @@ def get_update_form_modal(leave_request: LeaveRequest):
                 "optional": False
             }
         ]
+    }
+
+# Add this new function to slack_blocks.py
+def get_calendar_view_modal(leave_requests, month_date, title: str, viewer_employee_id=None, summary_info=None):
+    """
+    Generates a reusable, interactive modal with a monthly calendar view.
+    Can optionally include a summary block for the employee view.
+
+    Args:
+        leave_requests: A queryset of LeaveRequest objects to display.
+        month_date: A date object for the month to display.
+        title (str): The title for the modal window.
+        viewer_employee_id: The ID of the employee viewing the calendar, used to highlight their own leaves.
+        summary_info (dict, optional): A dictionary with allowance data for the employee view.
+                                       Example: {'allowance': 2, 'remaining': 1}
+    """
+    blocks = []
+
+    # --- NEW: Conditionally add a summary block at the top ---
+    if summary_info:
+        summary_text = (
+            f"*Your Leave Summary for {month_name[month_date.month]} {month_date.year}*\n"
+            f"Monthly Allowance: *{summary_info['allowance']} days*\n"
+            f"Remaining This Month: *{summary_info['remaining']} days*"
+        )
+        blocks.extend([
+            {"type": "section", "text": {"type": "mrkdwn", "text": summary_text}},
+            {"type": "divider"}
+        ])
+
+    # 1. Group leave requests by the day they occur on.
+    leaves_by_day = {day: [] for day in range(1, 32)}
+    for req in leave_requests:
+        current_date = req.start_date
+        while current_date <= req.end_date:
+            if current_date.month == month_date.month:
+                leaves_by_day[current_date.day].append(req)
+            current_date += timedelta(days=1)
+
+    # 2. Build the calendar string week by week.
+    calendar_title = f"{title} for {month_name[month_date.month]} {month_date.year}"
+    
+    calendar_lines = [calendar_title, "=" * len(calendar_title)] # Add a title and underline
+    
+    first_day_of_month, num_days = monthrange(month_date.year, month_date.month)
+
+    for day in range(1, num_days + 1):
+        weekday = (first_day_of_month + day - 1) % 7
+        day_name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday]
+        
+        # Create the date part and pad it to a fixed length
+        date_part = f"{day_name} {day:02d}:"
+        padded_date_part = date_part.ljust(10) # Pad with spaces to 10 characters
+        
+        # Create the status part
+        status_part = ""
+        if weekday < 5: # It's a weekday
+            requests_for_day = leaves_by_day.get(day, [])
+            if requests_for_day:
+                day_entries = []
+                for req in requests_for_day:
+                    status_emoji = {'approved': '✅', 'rejected': '❌', 'pending': '⏳', 'cancelled': '🗑️'}.get(req.status, '')
+                    name_display = req.employee.name
+                    if viewer_employee_id and req.employee.id == viewer_employee_id:
+                        name_display = f"{req.employee.name} (Your Leave)"
+                    day_entries.append(f"{status_emoji} {name_display}")
+                status_part = ", ".join(day_entries)
+            else:
+                status_part = "Available"
+        else: # It's a weekend
+            status_part = "(Weekend)"
+        
+        calendar_lines.append(f"{padded_date_part}{status_part}")
+
+                # If the current day is a Sunday and it's not the last day of the month, add a blank line.
+        if weekday == 6 and day < num_days:
+            calendar_lines.append("")
+
+    # Join all lines and wrap them in a code block
+    calendar_body = "\n".join(calendar_lines)
+    final_markdown = f"```{calendar_body}```"
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": final_markdown}})
+    
+    # Navigation buttons remain the same
+    prev_month = (month_date.replace(day=1) - timedelta(days=1)).strftime('%Y-%m-%d')
+    next_month = (month_date.replace(day=28) + timedelta(days=4)).strftime('%Y-%m-01')
+
+    navigation_buttons = {
+        "type": "actions",
+        "elements": [
+            {"type": "button", "text": {"type": "plain_text", "text": "⬅️ Previous"}, "action_id": "navigate_calendar_prev", "value": prev_month},
+            {"type": "button", "text": {"type": "plain_text", "text": "Next ➡️"}, "action_id": "navigate_calendar_next", "value": next_month}
+        ]
+    }
+    blocks.extend([{"type": "divider"}, navigation_buttons])
+    
+    return {
+        "type": "modal",
+        "callback_id": "team_leave_calendar",
+        "title": {"type": "plain_text", "text": title},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks
     }
