@@ -179,46 +179,31 @@ def get_approval_message_blocks(leave_request: LeaveRequest, is_completed=False,
     # This section is also from your original code.
     if is_completed:
         status_emoji = "✅" if leave_request.status == "approved" else "❌"
-        manager_name = leave_request.approver.name if leave_request.approver else "N/A"
+        manager_name = leave_request.approver.name if leave_request.approver else "System"
         status_text = f"{status_emoji} *{leave_request.status.title()}* by {manager_name}"
         
+        status_block = {"type": "section", "text": {"type": "mrkdwn", "text": status_text}}
+        
+        # --- THIS IS THE FIX: The status message now comes BEFORE the divider ---
         blocks.extend([
-            {"type": "divider"},
-            {"type": "section", "text": {"type": "mrkdwn", "text": status_text}}
+            status_block,
+            {"type": "divider"}
         ])
     else:
-        # If the request is pending, show the action buttons
+        action_buttons = {
+            "type": "actions",
+            "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve"}, "style": "primary", "action_id": "approve_leave", "value": str(leave_request.id)},
+                {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"}, "style": "danger", "action_id": "reject_leave", "value": str(leave_request.id)},
+                {"type": "button", "text": {"type": "plain_text", "text": "Who else is off?"}, "action_id": "view_overlapping_leave", "value": str(leave_request.id)}
+            ]
+        }
         blocks.extend([
-            {"type": "divider"},
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "✅ Approve"},
-                        "style": "primary",
-                        "action_id": "approve_leave",
-                        "value": str(leave_request.id)
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "❌ Reject"},
-                        "style": "danger",
-                        "action_id": "reject_leave",
-                        "value": str(leave_request.id)
-                    },
-                    {
-                        "type": "button", 
-                        "text": {"type": "plain_text", "text": "Who else is off?"}, 
-                        "action_id": "view_overlapping_leave", 
-                        "value": str(leave_request.id)
-                    }
-                ]
-            }
+            action_buttons,
+            {"type": "divider"}
         ])
     
     return blocks
-
 def get_selection_modal(pending_requests, action_type: str):
     """
     Creates a modal for selecting a pending leave request to update or cancel.
@@ -394,51 +379,51 @@ def get_calendar_view_modal(leave_requests, month_date, title: str, viewer_emplo
             current_date += timedelta(days=1)
 
     # 2. Build the calendar string week by week.
-    calendar_title = f"*{title} for {month_name[month_date.month]} {month_date.year}*\n"
-    weekly_blocks_text = []
-    current_week_lines = []
+    calendar_title = f"{title} for {month_name[month_date.month]} {month_date.year}"
+    
+    calendar_lines = [calendar_title, "=" * len(calendar_title)] # Add a title and underline
+    
     first_day_of_month, num_days = monthrange(month_date.year, month_date.month)
-
-    current_week_lines.extend([""] * first_day_of_month)
 
     for day in range(1, num_days + 1):
         weekday = (first_day_of_month + day - 1) % 7
         day_name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday]
         
-        line = f"*{day_name} {day:02d}:* "
+        # Create the date part and pad it to a fixed length
+        date_part = f"{day_name} {day:02d}:"
+        padded_date_part = date_part.ljust(10) # Pad with spaces to 10 characters
         
+        # Create the status part
+        status_part = ""
         if weekday < 5: # It's a weekday
             requests_for_day = leaves_by_day.get(day, [])
             if requests_for_day:
                 day_entries = []
                 for req in requests_for_day:
-                    status_emoji = {
-                        'approved': '✅', 'rejected': '❌',
-                        'pending': '⏳', 'cancelled': '🗑️'
-                    }.get(req.status, '')
-                    
-                    name_display = f"_{req.employee.name}_"
-                    # Highlight the viewer's own leave in any view
+                    status_emoji = {'approved': '✅', 'rejected': '❌', 'pending': '⏳', 'cancelled': '🗑️'}.get(req.status, '')
+                    name_display = req.employee.name
                     if viewer_employee_id and req.employee.id == viewer_employee_id:
-                        name_display = f"*{req.employee.name} (Your Leave)*"
-
+                        name_display = f"{req.employee.name} (Your Leave)"
                     day_entries.append(f"{status_emoji} {name_display}")
-                line += ", ".join(day_entries)
+                status_part = ", ".join(day_entries)
             else:
-                line += "▫️ Available"
+                status_part = "Available"
         else: # It's a weekend
-            line += "_(Weekend)_"
+            status_part = "(Weekend)"
         
-        current_week_lines.append(line)
-        
-        if weekday == 6 or day == num_days:
-            weekly_blocks_text.append("> " + "\n> ".join(filter(None, current_week_lines)))
-            current_week_lines = []
+        calendar_lines.append(f"{padded_date_part}{status_part}")
 
-    calendar_body = "\n\n".join(weekly_blocks_text)
-    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": calendar_title + calendar_body}})
+                # If the current day is a Sunday and it's not the last day of the month, add a blank line.
+        if weekday == 6 and day < num_days:
+            calendar_lines.append("")
+
+    # Join all lines and wrap them in a code block
+    calendar_body = "\n".join(calendar_lines)
+    final_markdown = f"```{calendar_body}```"
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": final_markdown}})
     
-    # 3. Create navigation buttons.
+    # Navigation buttons remain the same
     prev_month = (month_date.replace(day=1) - timedelta(days=1)).strftime('%Y-%m-%d')
     next_month = (month_date.replace(day=28) + timedelta(days=4)).strftime('%Y-%m-01')
 
