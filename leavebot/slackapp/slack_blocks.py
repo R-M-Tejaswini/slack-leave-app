@@ -120,90 +120,65 @@ def get_approval_message_blocks(leave_request: LeaveRequest, is_completed=False,
     """
     employee_name = leave_request.employee.name
     slack_user_id = leave_request.employee.slack_user_id
-
-    # --- 1. Handle Cancelled State First ---
-    # If the request is cancelled, we show a simple message and stop.
-    if is_cancelled:
-        return [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"Leave request #{leave_request.id} for <@{slack_user_id}> was *cancelled* by the employee."
-                }
-            }
-        ]
-
-    # --- 2. Determine the Title ---
-    # This combines your original logic with the new 'updated' state.
     leave_type_name = leave_request.leave_type.name
+
+    # --- 1. Determine the Title and Header ---
     is_unplanned = leave_type_name in ["Unplanned", "Emergency"]
-    
-    # Set the base title based on whether it's planned or retrospective
     base_title = "Retrospective Leave Submission" if is_unplanned else "New Leave Request"
-    
-    # Add the '(Updated)' tag if needed, then wrap in markdown
-    title_text = f"*{base_title} (Updated)*" if is_updated else f"*{base_title}*"
+    header_text = f"{base_title} for {employee_name}"
+    if is_updated:
+        header_text = f"UPDATED: {header_text}"
 
-
-    # --- 3. Build the Message Details ---
-    # This section is from your original code.
-    duration = f"{leave_request.start_date}"
-    if leave_request.end_date != leave_request.start_date:
-        duration = f"{leave_request.start_date} to {leave_request.end_date}"
+    blocks = [{"type": "header", "text": {"type": "plain_text", "text": header_text}}]
     
+    # Add a visual warning if the request has been updated
+    if is_updated:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": ":warning: *The details of this request have been updated by the employee.*"}]})
+
+    # --- 2. Build the Message Details using Fields for a 2-column layout ---
     duration_days = leave_request.duration_days
     day_text = "day" if duration_days == 1 else "days"
+    duration_str = f"{leave_request.start_date.strftime('%b %d')} to {leave_request.end_date.strftime('%b %d')}"
+    if leave_request.start_date == leave_request.end_date:
+        duration_str = leave_request.start_date.strftime('%B %d, %Y')
     
-    blocks = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"{title_text} (#{leave_request.id})\n\n"
-                       f"*Employee:* <@{slack_user_id}> ({employee_name})\n"
-                       f"*Dates:* {duration} (*{duration_days} {day_text}*)\n"
-                       f"*Type:* {leave_type_name}\n"
-                       f"*Submitted:* {leave_request.created_at.strftime('%b %d, %Y at %H:%M')}"
-            }
-        }
-    ]
-    
+    # The fields element automatically creates a neat two-column layout
+    details_section = {
+        "type": "section",
+        "fields": [
+            # --- First Row ---
+            {"type": "mrkdwn", "text": f"*Employee:*\n<@{slack_user_id}>"},
+            {"type": "mrkdwn", "text": f"*Dates Requested:*\n{duration_str} (*{duration_days} {day_text}*)"},
+            
+            # ---  BLANK ROW ---
+            {"type": "plain_text", "text": "\u00A0"}, # Invisible spacer for left column
+            {"type": "plain_text", "text": "\u00A0"}, # Invisible spacer for right column
+
+            # --- Second Row ---
+            {"type": "mrkdwn", "text": f"*Leave Type:*\n{leave_type_name}"},
+            {"type": "mrkdwn", "text": f"*Status:*\n{leave_request.status.title()}"},
+        ]
+    }
+    blocks.append(details_section)
+
     if leave_request.reason:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Reason:* {leave_request.reason}"}
-        })
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Reason Provided:*\n{leave_request.reason}"}})
     
-    # --- 4. Add Final Status or Action Buttons ---
-    # This section is also from your original code.
+    # Add a context block for metadata
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"Request ID: #{leave_request.id} | Submitted: {leave_request.created_at.strftime('%b %d, %Y')}"}]})
+
+    # --- 3. Add Final Status or Action Buttons ---
     if is_completed:
         status_emoji = "✅" if leave_request.status == "approved" else "❌"
         manager_name = leave_request.approver.name if leave_request.approver else "System"
-        status_text = f"{status_emoji} *{leave_request.status.title()}* by {manager_name}"
-        
-        status_block = {"type": "section", "text": {"type": "mrkdwn", "text": status_text}}
-        
-        # --- THIS IS THE FIX: The status message now comes BEFORE the divider ---
-        blocks.extend([
-            status_block,
-            {"type": "divider"}
-        ])
+        status_text = f"{status_emoji} *Action taken by {manager_name}*"
+        blocks.extend([{"type": "divider"}, {"type": "section", "text": {"type": "mrkdwn", "text": status_text}}])
     else:
-        action_buttons = {
-            "type": "actions",
-            "elements": [
-                {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve"}, "style": "primary", "action_id": "approve_leave", "value": str(leave_request.id)},
-                {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"}, "style": "danger", "action_id": "reject_leave", "value": str(leave_request.id)},
-                {"type": "button", "text": {"type": "plain_text", "text": "Who else is off?"}, "action_id": "view_overlapping_leave", "value": str(leave_request.id)}
-            ]
-        }
-        blocks.extend([
-            action_buttons,
-            {"type": "divider"}
-        ])
+        action_buttons = {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "✅ Approve"}, "style": "primary", "action_id": "approve_leave", "value": str(leave_request.id)}, {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"}, "style": "danger", "action_id": "reject_leave", "value": str(leave_request.id)}, {"type": "button", "text": {"type": "plain_text", "text": "Who else is off?"}, "action_id": "view_overlapping_leave", "value": str(leave_request.id)}]}
+        blocks.extend([action_buttons,{"type": "divider"}])
     
     return blocks
+
 def get_selection_modal(pending_requests, action_type: str):
     """
     Creates a modal for selecting a pending leave request to update or cancel.
@@ -343,6 +318,7 @@ def get_update_form_modal(leave_request: LeaveRequest):
 
 # Add this new function to slack_blocks.py
 def get_calendar_view_modal(leave_requests, month_date, title: str, viewer_employee_id=None, summary_info=None):
+
     """
     Generates a reusable, interactive modal with a monthly calendar view.
     Can optionally include a summary block for the employee view.
@@ -443,3 +419,37 @@ def get_calendar_view_modal(leave_requests, month_date, title: str, viewer_emplo
         "close": {"type": "plain_text", "text": "Close"},
         "blocks": blocks
     }
+
+def get_employee_notification_blocks(leave_request: LeaveRequest):
+    """
+    Generates a clean, professional notification for the employee after
+    their request has been actioned.
+    """
+    status = leave_request.status
+    approver_name = leave_request.approver.name if leave_request.approver else "the system"
+
+    if status == 'approved':
+        header_text = "✅ Your Leave Request was Approved"
+        context_text = f"Approved by *{approver_name}*."
+    elif status == 'rejected':
+        header_text = "❌ Your Leave Request was Rejected"
+        context_text = f"Rejected by *{approver_name}*."
+    else: # Cancelled
+        header_text = "🗑️ Your Leave Request was Cancelled"
+        context_text = "You have cancelled this request."
+
+    duration_str = f"{leave_request.start_date.strftime('%b %d')} to {leave_request.end_date.strftime('%b %d')}"
+    if leave_request.start_date == leave_request.end_date:
+        duration_str = leave_request.start_date.strftime('%B %d, %Y')
+
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": header_text}},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Leave Type:*\n{leave_request.leave_type.name}"},
+                {"type": "mrkdwn", "text": f"*Dates:*\n{duration_str}"}
+            ]
+        },
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": context_text}]}
+    ]

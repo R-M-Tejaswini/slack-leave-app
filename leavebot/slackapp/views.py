@@ -18,7 +18,7 @@ from django.http import JsonResponse
 
 from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit, Holiday
 from .utils import verify_slack_request
-from .slack_blocks import get_leave_form_modal, get_approval_message_blocks, get_selection_modal,get_update_form_modal, get_calendar_view_modal
+from .slack_blocks import get_leave_form_modal, get_approval_message_blocks, get_selection_modal,get_update_form_modal, get_calendar_view_modal,get_employee_notification_blocks
 from .tasks import send_manager_reminder
 
 # --- Initialization ---
@@ -249,9 +249,6 @@ def validate_leave_request(employee, start_date, end_date, leave_type_str, leave
     return None
 
 @transaction.atomic
-
-
-
 def handle_update_selection(payload):
     """
     Handles the user selecting a leave request.
@@ -268,7 +265,6 @@ def handle_update_selection(payload):
         # Build the new modal view, pre-filled with the request's data.
         update_modal_view = get_update_form_modal(leave_request)
         
-        # --- THE FIX IS HERE ---
         # Instead of calling slack_client, return a JSON response
         # that tells Slack to update the view directly.
         return JsonResponse({
@@ -596,21 +592,20 @@ def update_approval_message(leave_request: LeaveRequest, is_updated=False, is_ca
         logger.error(f"Error updating approval message: {e.response['error']}")
 
 
-def notify_employee(leave_request):
+def notify_employee(leave_request: LeaveRequest):
     """
-    Sends a DM to the employee with the final status of their request.
+    Sends a final confirmation DM to the employee using a rich block layout.
     """
-    employee = leave_request.employee
-    approver = leave_request.approver
-    status_emoji = "✅" if leave_request.status == "approved" else "❌"
-
     try:
+        # Generate the blocks using the new function
+        blocks = get_employee_notification_blocks(leave_request)
+        # Send a fallback text for notifications
+        text = f"Your leave request for {leave_request.start_date} has been {leave_request.status}."
+        
         slack_client.chat_postMessage(
-            channel=employee.slack_user_id,
-            text=f"Your leave request has been *{leave_request.status}* {status_emoji}\n\n"
-                 f"Your request for *{leave_request.leave_type.name}* from "
-                 f"*{leave_request.start_date}* to *{leave_request.end_date}* "
-                 f"was {leave_request.status} by {approver.name}."
+            channel=leave_request.employee.slack_user_id,
+            text=text,
+            blocks=blocks
         )
     except SlackApiError as e:
         logger.error(f"Error sending employee notification DM: {e.response['error']}")
