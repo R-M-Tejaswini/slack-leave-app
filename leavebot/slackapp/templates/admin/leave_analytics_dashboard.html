@@ -1,0 +1,331 @@
+<!-- leavebot/templates/admin/leave_analytics_dashboard.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        
+        .dashboard-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .dashboard-header h1 {
+            margin: 0 0 10px 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        
+        .dashboard-header p {
+            margin: 0;
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            transition: transform 0.2s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-number {
+            font-size: 3em;
+            font-weight: bold;
+            color: #667eea;
+            margin: 0;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-top: 5px;
+        }
+        
+        .chart-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 30px;
+        }
+        
+        .chart-container {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s ease;
+        }
+        
+        .chart-container:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+        }
+        
+        .chart-title {
+            font-size: 1.5em;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 20px;
+            text-align: center;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .chart-image {
+            width: 100%;
+            height: auto;
+            border-radius: 8px;
+        }
+        
+        .no-data {
+            text-align: center;
+            color: #999;
+            font-style: italic;
+            padding: 40px;
+            background: #f9f9f9;
+            border-radius: 8px;
+        }
+        
+        .back-button {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 12px 24px;
+            text-decoration: none;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            transition: background 0.2s ease;
+            font-weight: 500;
+        }
+        
+        .back-button:hover {
+            background: #5a67d8;
+            text-decoration: none;
+            color: white;
+        }
+        
+        .alert {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .alert-success {
+            background: #d1edff;
+            border-color: #b8daff;
+            color: #004085;
+        }
+        
+        .alert-warning {
+            background: #fff3cd;
+            border-color: #ffeaa7;
+            color: #856404;
+        }
+        
+        .alert-danger {
+            background: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+        
+        .timestamp {
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }
+        
+        @media (min-width: 1200px) {
+            .chart-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+            
+            .chart-container.full-width {
+                grid-column: 1 / -1;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .dashboard-header {
+                padding: 20px;
+            }
+            
+            .dashboard-header h1 {
+                font-size: 2em;
+            }
+            
+            .chart-container {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <a href="../" class="back-button">← Back to Leave Requests</a>
+    
+    <div class="dashboard-header">
+        <h1>{{ title }}</h1>
+        <p>Real-time analytics and insights for leave management</p>
+    </div>
+
+    <!-- Summary Statistics -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-number">{{ summary_stats.pending_requests }}</div>
+            <div class="stat-label">Pending Requests</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ summary_stats.currently_on_leave }}</div>
+            <div class="stat-label">Currently on Leave</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ summary_stats.approved_this_month }}</div>
+            <div class="stat-label">Approved This Month</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ summary_stats.avg_approval_hours }}h</div>
+            <div class="stat-label">Avg Approval Time</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ summary_stats.total_employees }}</div>
+            <div class="stat-label">Total Employees</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ summary_stats.active_teams }}</div>
+            <div class="stat-label">Active Teams</div>
+        </div>
+    </div>
+
+    <!-- Alerts Section -->
+    {% if summary_stats.pending_requests > 5 %}
+    <div class="alert alert-warning">
+        <strong>Action Required:</strong> You have {{ summary_stats.pending_requests }} pending leave requests that need attention.
+    </div>
+    {% endif %}
+
+    <!-- Charts Section -->
+    <div class="chart-grid">
+        <!-- Team Coverage Risk Analysis -->
+        <div class="chart-container full-width">
+            <h2 class="chart-title">🚨 Team Coverage Risk Analysis</h2>
+            {% if chart_team_coverage %}
+                <img src="data:image/png;base64,{{ chart_team_coverage }}" alt="Team Coverage Risk Analysis" class="chart-image">
+            {% else %}
+                <div class="no-data">No team coverage data available</div>
+            {% endif %}
+        </div>
+
+        <!-- Monthly Trends -->
+        <div class="chart-container">
+            <h2 class="chart-title">📈 Monthly Leave Trends</h2>
+            {% if chart_monthly_trends %}
+                <img src="data:image/png;base64,{{ chart_monthly_trends }}" alt="Monthly Leave Trends" class="chart-image">
+            {% else %}
+                <div class="no-data">No monthly trend data available</div>
+            {% endif %}
+        </div>
+
+        <!-- Leave Patterns Heatmap -->
+        <div class="chart-container">
+            <h2 class="chart-title">🗓️ Leave Pattern Analysis</h2>
+            {% if chart_leave_patterns %}
+                <img src="data:image/png;base64,{{ chart_leave_patterns }}" alt="Leave Patterns Heatmap" class="chart-image">
+            {% else %}
+                <div class="no-data">No leave pattern data available</div>
+            {% endif %}
+        </div>
+
+        <!-- Approval Metrics -->
+        <div class="chart-container">
+            <h2 class="chart-title">✅ Approval Workflow Metrics</h2>
+            {% if chart_approval_metrics %}
+                <img src="data:image/png;base64,{{ chart_approval_metrics }}" alt="Approval Metrics" class="chart-image">
+            {% else %}
+                <div class="no-data">No approval metrics data available</div>
+            {% endif %}
+        </div>
+
+        <!-- Utilization Analysis -->
+        <div class="chart-container">
+            <h2 class="chart-title">📊 Leave Utilization Analysis</h2>
+            {% if chart_utilization_analysis %}
+                <img src="data:image/png;base64,{{ chart_utilization_analysis }}" alt="Utilization Analysis" class="chart-image">
+            {% else %}
+                <div class="no-data">No utilization data available</div>
+            {% endif %}
+        </div>
+
+        <!-- Team Workload Impact Forecast -->
+        <div class="chart-container full-width">
+            <h2 class="chart-title">🔮 30-Day Team Workload Impact Forecast</h2>
+            {% if chart_team_workload %}
+                <img src="data:image/png;base64,{{ chart_team_workload }}" alt="Team Workload Impact" class="chart-image">
+            {% else %}
+                <div class="no-data">No workload forecast data available</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="timestamp">
+        Dashboard generated on {{ "now"|date:"F j, Y \a\t g:i A" }}
+        <br>
+        <small>Data refreshes automatically when you reload this page</small>
+    </div>
+
+    <script>
+        // Auto-refresh dashboard every 5 minutes
+        setTimeout(function() {
+            location.reload();
+        }, 300000);
+
+        // Add loading states for better UX
+        document.addEventListener('DOMContentLoaded', function() {
+            const images = document.querySelectorAll('.chart-image');
+            images.forEach(img => {
+                img.addEventListener('load', function() {
+                    this.style.opacity = '1';
+                });
+                img.style.opacity = '0';
+                img.style.transition = 'opacity 0.3s ease';
+            });
+        });
+    </script>
+</body>
+</html>
