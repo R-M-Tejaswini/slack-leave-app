@@ -1,44 +1,66 @@
 # leavebot/slackapp/admin.py
-"""
-Admin panel configuration for the slackapp.
 
-This file defines how the models are displayed and managed in the Django
-admin interface. Using ModelAdmin classes allows for rich customization
-of the admin experience.
+
 """
+Admin Panel Configuration for the Slack Leave Management App.
+
+This module configures the Django admin interface for the `slackapp` models.
+It defines custom `ModelAdmin` classes to enhance the display, filtering, 
+and functionality of models like Employee, LeaveRequest, and Team.
+
+A key feature is a custom analytics dashboard integrated into the LeaveRequest 
+admin page, providing visualizations and statistics on leave patterns, team 
+coverage, and approval metrics using Matplotlib.
+"""
+
+# Standard library imports
+import base64
+from io import BytesIO
+from datetime import date, datetime, timedelta
+from typing import Optional # <-- ADD THIS IMPORT
+
+# Django imports
 from django.contrib import admin
 from django.urls import path
 from django.shortcuts import render
-from django.db.models import Count, Sum, Q, Avg, F
-from django.db.models.functions import TruncMonth, TruncWeek
-from datetime import date, datetime, timedelta
-from calendar import monthrange
-import base64
-from io import BytesIO
+from django.db.models import Count, Q
+from django.db.models.functions import TruncMonth
+
+# Third-party library imports
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg')  # Use 'Agg' backend for non-interactive plotting
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from matplotlib.patches import Rectangle
 import seaborn as sns
 import numpy as np
+
+# Local application imports
 from .models import Employee, LeaveType, LeaveRequest, LeaveRequestAudit, Holiday, Team
 
-# Set professional styling
+# --- Matplotlib and Seaborn Styling ---
+# Apply a professional and consistent visual style to all generated plots.
 plt.style.use('seaborn-v0_8-whitegrid')
 sns.set_palette("husl")
 
+
 @admin.register(Team)
 class TeamAdmin(admin.ModelAdmin):
-    """Admin configuration for the Team model."""
+    """
+    Admin configuration for the Team model.
+    
+    Displays team information along with calculated fields for team size
+    and the number of members currently on leave.
+    """
     list_display = ('name', 'slack_channel_id', 'employee_count', 'current_on_leave')
     search_fields = ('name',)
     
-    def employee_count(self, obj):
+    def employee_count(self, obj: Team) -> int:
+        """Calculates the total number of employees in the team."""
         return obj.employee_set.count()
     employee_count.short_description = 'Team Size'
     
-    def current_on_leave(self, obj):
+    def current_on_leave(self, obj: Team) -> int:
+        """Counts employees in the team who are on an approved leave today."""
         today = date.today()
         return LeaveRequest.objects.filter(
             employee__team=obj,
@@ -48,16 +70,33 @@ class TeamAdmin(admin.ModelAdmin):
         ).count()
     current_on_leave.short_description = 'Currently on Leave'
 
+
 @admin.register(Employee)
 class EmployeeAdmin(admin.ModelAdmin):
+    """
+    Admin configuration for the Employee model.
+    
+    Provides a list view with key employee details and a calculated
+    remaining leave balance for the current month.
+    """
     list_display = ('name', 'slack_user_id', 'team', 'manager', 'monthly_leave_allowance', 'leave_balance')
     search_fields = ('name', 'slack_user_id', 'email')
     list_filter = ('team', 'manager',)
     
-    def leave_balance(self, obj):
-        """Calculate remaining leave balance for current month"""
+    def leave_balance(self, obj: Employee) -> float:
+        """
+        Calculates the employee's remaining leave balance for the current calendar month.
+        
+        Args:
+            obj: The Employee instance.
+        
+        Returns:
+            The number of remaining leave days.
+        """
         today = date.today()
         month_start = date(today.year, today.month, 1)
+        
+        # Sum the duration of all approved leaves starting this month.
         current_month_requests = LeaveRequest.objects.filter(
             employee=obj,
             status='approved',
@@ -65,19 +104,29 @@ class EmployeeAdmin(admin.ModelAdmin):
             start_date__lte=today
         )
         used_days = sum(request.duration_days for request in current_month_requests)
+        
         return max(0, obj.monthly_leave_allowance - used_days)
-    leave_balance.short_description = 'Remaining Days'
+    leave_balance.short_description = 'Remaining Days (This Month)'
+
 
 @admin.register(LeaveType)
 class LeaveTypeAdmin(admin.ModelAdmin):
+    """
+    Admin configuration for the LeaveType model.
+    
+    Displays leave types along with usage statistics, such as the total
+    number of requests and the average duration.
+    """
     list_display = ('name', 'description', 'usage_count', 'avg_duration')
     search_fields = ('name',)
     
-    def usage_count(self, obj):
+    def usage_count(self, obj: LeaveType) -> int:
+        """Counts how many times this leave type has been requested."""
         return obj.leaverequest_set.count()
     usage_count.short_description = 'Total Requests'
     
-    def avg_duration(self, obj):
+    def avg_duration(self, obj: LeaveType) -> str:
+        """Calculates the average duration for this leave type."""
         requests = obj.leaverequest_set.all()
         if requests:
             total_days = sum(request.duration_days for request in requests)
@@ -86,28 +135,48 @@ class LeaveTypeAdmin(admin.ModelAdmin):
         return "N/A"
     avg_duration.short_description = 'Avg Duration'
 
+
 @admin.register(Holiday)
 class HolidayAdmin(admin.ModelAdmin):
+    """
+    Admin configuration for the Holiday model.
+    
+    Allows for easy management of public holidays and indicates whether
+    a holiday is upcoming.
+    """
     list_display = ('name', 'date', 'is_upcoming')
     list_filter = ('date',)
     search_fields = ('name',)
     
-    def is_upcoming(self, obj):
+    def is_upcoming(self, obj: Holiday) -> bool:
+        """Returns True if the holiday date is in the future."""
         return obj.date > date.today()
     is_upcoming.boolean = True
     is_upcoming.short_description = 'Upcoming'
 
+
 @admin.register(LeaveRequest)
 class LeaveRequestAdmin(admin.ModelAdmin):
+    """
+    Admin configuration for the LeaveRequest model.
+    
+    This is the main hub for leave management, featuring a detailed list view,
+    filters, and a custom analytics dashboard accessible via an "Analytics" button.
+    """
     list_display = ('id', 'employee', 'leave_type', 'start_date', 'end_date', 'duration_days', 'status', 'approver')
     list_filter = ('status', 'leave_type', 'start_date', 'employee__team')
     search_fields = ('employee__name', 'employee__slack_user_id')
     readonly_fields = ('created_at', 'updated_at', 'duration_days')
     
+    # Use a custom template to add an "Analytics" button to the changelist view.
     change_list_template = "admin/leave_request_changelist.html"
 
     def get_urls(self):
-        """Override default admin URLs to add analytics dashboard."""
+        """
+        Overrides the default admin URLs to add a custom path for the analytics dashboard.
+        
+        This makes the view available at `/admin/slackapp/leaverequest/analytics/`.
+        """
         urls = super().get_urls()
         custom_urls = [
             path('analytics/', self.admin_site.admin_view(self.analytics_view), name='leave_analytics'),
@@ -115,7 +184,18 @@ class LeaveRequestAdmin(admin.ModelAdmin):
         return custom_urls + urls
 
     def analytics_view(self, request):
-        """Enhanced analytics dashboard with multiple professional charts."""
+        """
+        Renders the leave management analytics dashboard.
+        
+        This view aggregates data and generates several plots to provide insights
+        into leave trends, team capacity, and operational efficiency.
+        
+        Args:
+            request: The HttpRequest object.
+            
+        Returns:
+            An HttpResponse object rendering the dashboard template with chart data.
+        """
         context = {
             'title': 'Leave Management Analytics Dashboard',
             'chart_team_coverage': self.get_team_coverage_chart(),
@@ -128,24 +208,29 @@ class LeaveRequestAdmin(admin.ModelAdmin):
         }
         return render(request, 'admin/leave_analytics_dashboard.html', context)
 
-    def get_summary_statistics(self):
-        """Calculate key summary statistics for the dashboard."""
+    def get_summary_statistics(self) -> dict:
+        """
+        Calculates key summary statistics for the dashboard's header.
+        
+        Returns:
+            A dictionary containing key metrics like pending requests, average
+            approval time, and total active employees.
+        """
         today = date.today()
         current_month = date(today.year, today.month, 1)
         
-        # Current month stats
+        # --- Calculate Key Metrics ---
         current_month_requests = LeaveRequest.objects.filter(start_date__gte=current_month)
         pending_requests = current_month_requests.filter(status='pending').count()
         approved_requests = current_month_requests.filter(status='approved').count()
         
-        # People currently on leave
         current_on_leave = LeaveRequest.objects.filter(
             status='approved',
             start_date__lte=today,
             end_date__gte=today
         ).count()
         
-        # Average approval time (in hours)
+        # Calculate average approval time in hours
         approved_with_audit = LeaveRequest.objects.filter(
             status='approved',
             audit_trail__action='approved'
@@ -170,8 +255,17 @@ class LeaveRequestAdmin(admin.ModelAdmin):
             'active_teams': Team.objects.count(),
         }
 
-    def get_team_coverage_chart(self):
-        """Generate team coverage risk analysis chart."""
+    def get_team_coverage_chart(self) -> Optional[str]: # <-- FIXED
+        """
+        Generates a chart analyzing team coverage risk.
+        
+        The chart has two subplots:
+        1. A horizontal bar chart showing coverage risk percentage for each team.
+        2. A stacked bar chart showing total team size vs. members on leave.
+        
+        Returns:
+            A base64 encoded string of the plot PNG, or None if no data.
+        """
         today = date.today()
         teams = Team.objects.all()
         
@@ -180,84 +274,80 @@ class LeaveRequestAdmin(admin.ModelAdmin):
             total_employees = team.employee_set.count()
             if total_employees == 0:
                 continue
-                
-            # People currently on leave
-            on_leave = LeaveRequest.objects.filter(
-                employee__team=team,
-                status='approved',
-                start_date__lte=today,
-                end_date__gte=today
+            
+            on_leave_today = LeaveRequest.objects.filter(
+                employee__team=team, status='approved', start_date__lte=today, end_date__gte=today
             ).count()
             
-            # Upcoming leave (next 7 days)
-            upcoming = LeaveRequest.objects.filter(
-                employee__team=team,
-                status='approved',
-                start_date__gt=today,
-                start_date__lte=today + timedelta(days=7)
+            upcoming_leave = LeaveRequest.objects.filter(
+                employee__team=team, status='approved', start_date__gt=today, start_date__lte=today + timedelta(days=7)
             ).count()
             
-            coverage_risk = (on_leave + upcoming) / total_employees * 100
-            team_data.append((team.name, total_employees, on_leave, upcoming, coverage_risk))
+            # Risk is defined as the percentage of the team unavailable now or in the next week.
+            coverage_risk = (on_leave_today + upcoming_leave) / total_employees * 100
+            team_data.append((team.name, total_employees, on_leave_today, upcoming_leave, coverage_risk))
         
         if not team_data:
             return None
             
-        team_data.sort(key=lambda x: x[4], reverse=True)  # Sort by risk
+        team_data.sort(key=lambda x: x[4], reverse=True)  # Sort by highest risk
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Coverage risk chart
-        teams = [x[0] for x in team_data]
+        # --- Subplot 1: Coverage Risk Bar Chart ---
+        team_names = [x[0] for x in team_data]
         risks = [x[4] for x in team_data]
         colors = ['red' if r > 30 else 'orange' if r > 15 else 'green' for r in risks]
         
-        bars1 = ax1.barh(teams, risks, color=colors, alpha=0.7)
+        bars1 = ax1.barh(team_names, risks, color=colors, alpha=0.7)
         ax1.set_xlabel('Coverage Risk (%)')
-        ax1.set_title('Team Coverage Risk Analysis')
+        ax1.set_title('Team Coverage Risk (Today + Next 7 Days)')
         ax1.axvline(x=15, color='orange', linestyle='--', alpha=0.5, label='Warning (15%)')
         ax1.axvline(x=30, color='red', linestyle='--', alpha=0.5, label='Critical (30%)')
         ax1.legend()
         
-        # Add value labels on bars
+        # Add value labels to bars
         for bar, risk in zip(bars1, risks):
-            width = bar.get_width()
-            ax1.text(width + 1, bar.get_y() + bar.get_height()/2, 
-                    f'{risk:.1f}%', ha='left', va='center')
+            ax1.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2, 
+                     f'{risk:.1f}%', ha='left', va='center')
         
-        # Team capacity overview
+        # --- Subplot 2: Team Capacity Stacked Bar Chart ---
         team_sizes = [x[1] for x in team_data]
         on_leaves = [x[2] for x in team_data]
         upcomings = [x[3] for x in team_data]
         
-        x = np.arange(len(teams))
-        width = 0.35
+        x_indices = np.arange(len(team_names))
         
-        ax2.bar(x, team_sizes, width, label='Total Employees', alpha=0.8)
-        ax2.bar(x, on_leaves, width, label='Currently on Leave', alpha=0.8)
-        ax2.bar(x, upcomings, width, bottom=on_leaves, label='Upcoming Leave', alpha=0.8)
+        ax2.bar(x_indices, team_sizes, label='Total Employees', alpha=0.8)
+        ax2.bar(x_indices, on_leaves, label='Currently on Leave', alpha=0.8)
+        ax2.bar(x_indices, upcomings, bottom=on_leaves, label='Upcoming Leave', alpha=0.8)
         
-        ax2.set_xlabel('Teams')
         ax2.set_ylabel('Number of Employees')
         ax2.set_title('Team Capacity Overview')
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(teams, rotation=45, ha='right')
+        ax2.set_xticks(x_indices)
+        ax2.set_xticklabels(team_names, rotation=45, ha='right')
         ax2.legend()
         
         plt.tight_layout()
         return self._save_plot_to_base64()
 
-    def get_monthly_trends_chart(self):
-        """Generate monthly leave trends over the past 12 months."""
+    def get_monthly_trends_chart(self) -> Optional[str]: # <-- FIXED
+        """
+        Generates a dual-axis line chart showing leave trends over the past 12 months.
+        
+        - Top plot shows the number of leave requests per month.
+        - Bottom plot shows the total number of leave days taken per month.
+        
+        Returns:
+            A base64 encoded string of the plot PNG, or None if no data.
+        """
         end_date = date.today()
         start_date = end_date - timedelta(days=365)
         
-        # Get monthly data - just count requests, calculate days in Python
         monthly_data = LeaveRequest.objects.filter(
-            start_date__range=[start_date, end_date],
-            status='approved'
-        ).extra(
-            select={'month': "strftime('%%Y-%%m', start_date)"}
+            start_date__range=[start_date, end_date], status='approved'
+        ).annotate(
+            month=TruncMonth('start_date')
         ).values('month').annotate(
             requests=Count('id')
         ).order_by('month')
@@ -265,111 +355,101 @@ class LeaveRequestAdmin(admin.ModelAdmin):
         if not monthly_data:
             return None
         
-        # Calculate total days for each month in Python
-        monthly_stats = []
-        for month_data in monthly_data:
-            month_str = month_data['month']
-            requests_count = month_data['requests']
-            
-            # Get all leave requests for this month and calculate total days
-            month_requests = LeaveRequest.objects.filter(
-                start_date__year=int(month_str[:4]),
-                start_date__month=int(month_str[5:7]),
-                status='approved'
-            )
-            
-            total_days = sum(request.duration_days for request in month_requests)
-            monthly_stats.append((month_str, requests_count, total_days))
-            
-        months = [datetime.strptime(item[0], '%Y-%m') for item in monthly_stats]
-        requests = [item[1] for item in monthly_stats]
-        days = [item[2] for item in monthly_stats]
+        # Aggregate total days per month in Python for simplicity
+        monthly_stats = {}
+        for item in monthly_data:
+            month_key = item['month'].strftime('%Y-%m')
+            monthly_stats[month_key] = {'requests': item['requests'], 'days': 0}
+        
+        all_requests = LeaveRequest.objects.filter(start_date__range=[start_date, end_date], status='approved')
+        for req in all_requests:
+            month_key = req.start_date.strftime('%Y-%m')
+            if month_key in monthly_stats:
+                monthly_stats[month_key]['days'] += req.duration_days
+        
+        # Prepare data for plotting
+        sorted_months = sorted(monthly_stats.keys())
+        months = [datetime.strptime(m, '%Y-%m') for m in sorted_months]
+        requests = [monthly_stats[m]['requests'] for m in sorted_months]
+        days = [monthly_stats[m]['days'] for m in sorted_months]
         
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
         
-        # Requests trend
-        ax1.plot(months, requests, marker='o', linewidth=2, markersize=6, color='#2E86AB')
+        # Subplot 1: Number of requests
+        ax1.plot(months, requests, marker='o', color='#2E86AB')
         ax1.fill_between(months, requests, alpha=0.3, color='#2E86AB')
         ax1.set_ylabel('Number of Requests')
         ax1.set_title('Monthly Leave Trends (Past 12 Months)')
-        ax1.grid(True, alpha=0.3)
         
-        # Days trend
-        ax2.plot(months, days, marker='s', linewidth=2, markersize=6, color='#A23B72')
+        # Subplot 2: Total leave days
+        ax2.plot(months, days, marker='s', color='#A23B72')
         ax2.fill_between(months, days, alpha=0.3, color='#A23B72')
         ax2.set_ylabel('Total Leave Days')
-        ax2.set_xlabel('Month')
-        ax2.grid(True, alpha=0.3)
         
-        # Format x-axis
-        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        # Format X-axis for clarity
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
         ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-        plt.xticks(rotation=45)
+        fig.autofmt_xdate()
         
         plt.tight_layout()
         return self._save_plot_to_base64()
 
-    def get_leave_patterns_heatmap(self):
-        """Generate a heatmap showing leave patterns by day of week and month."""
-        current_year = date.today().year
+    def get_leave_patterns_heatmap(self) -> Optional[str]: # <-- FIXED
+        """
+        Generates a heatmap of leave requests by month and day of the week for the current year.
         
-        # Get leave data for current year
+        This helps identify patterns, such as leaves being more common on
+        Mondays/Fridays or during specific seasons.
+        
+        Returns:
+            A base64 encoded string of the plot PNG, or None if no data.
+        """
         leaves = LeaveRequest.objects.filter(
             status='approved',
-            start_date__year=current_year
+            start_date__year=date.today().year
         ).values('start_date')
         
         if not leaves:
             return None
             
-        # Create heatmap data
-        heatmap_data = np.zeros((12, 7))  # 12 months, 7 days of week
+        # Initialize a 12x7 grid (months x days of week) with zeros.
+        heatmap_data = np.zeros((12, 7))  
         
         for leave in leaves:
-            month = leave['start_date'].month - 1  # 0-indexed
-            day_of_week = leave['start_date'].weekday()  # 0=Monday
-            heatmap_data[month][day_of_week] += 1
+            month_index = leave['start_date'].month - 1  # 0-indexed month
+            day_index = leave['start_date'].weekday()  # 0=Monday, 6=Sunday
+            heatmap_data[month_index][day_index] += 1
         
         fig, ax = plt.subplots(figsize=(10, 8))
         
-        # Create heatmap
-        im = ax.imshow(heatmap_data, cmap='YlOrRd', aspect='auto')
+        sns.heatmap(heatmap_data, ax=ax, cmap='YlOrRd', annot=True, fmt=".0f", linewidths=.5,
+                    xticklabels=['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+                    yticklabels=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
         
-        # Set ticks and labels
-        months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        ax.set_title(f'Leave Request Patterns - {date.today().year}')
+        ax.set_xlabel('Day of the Week')
+        ax.set_ylabel('Month')
         
-        ax.set_xticks(np.arange(7))
-        ax.set_yticks(np.arange(12))
-        ax.set_xticklabels(days)
-        ax.set_yticklabels(months)
-        
-        # Add colorbar
-        plt.colorbar(im, ax=ax, label='Number of Leave Requests')
-        
-        # Add text annotations
-        for i in range(12):
-            for j in range(7):
-                text = ax.text(j, i, int(heatmap_data[i, j]),
-                             ha="center", va="center", color="black", fontsize=8)
-        
-        ax.set_title(f'Leave Request Patterns - {current_year}\n(By Month and Day of Week)')
         plt.tight_layout()
         return self._save_plot_to_base64()
 
-    def get_approval_metrics_chart(self):
-        """Generate approval workflow metrics."""
-        # Get approval statistics
-        total_requests = LeaveRequest.objects.count()
-        status_counts = LeaveRequest.objects.values('status').annotate(count=Count('id'))
+    def get_approval_metrics_chart(self) -> Optional[str]: # <-- FIXED
+        """
+        Generates charts related to the leave approval process.
         
-        # Calculate approval rates by leave type
+        1. A pie chart showing the distribution of all request statuses.
+        2. A bar chart showing the approval rate for each leave type.
+        
+        Returns:
+            A base64 encoded string of the plot PNG, or None if no data.
+        """
+        status_counts = list(LeaveRequest.objects.values('status').annotate(count=Count('id')))
+        
         type_approval_data = []
         for leave_type in LeaveType.objects.all():
             total = LeaveRequest.objects.filter(leave_type=leave_type).count()
-            approved = LeaveRequest.objects.filter(leave_type=leave_type, status='approved').count()
             if total > 0:
+                approved = LeaveRequest.objects.filter(leave_type=leave_type, status='approved').count()
                 approval_rate = (approved / total) * 100
                 type_approval_data.append((leave_type.name, approval_rate, total))
         
@@ -378,128 +458,130 @@ class LeaveRequestAdmin(admin.ModelAdmin):
             
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Status distribution pie chart
-        statuses = [item['status'].title() for item in status_counts]
+        # --- Subplot 1: Status Distribution Pie Chart ---
+        labels = [item['status'].title() for item in status_counts]
         counts = [item['count'] for item in status_counts]
         colors = {'Pending': '#FFA500', 'Approved': '#32CD32', 'Rejected': '#FF6347', 'Cancelled': '#D3D3D3'}
-        pie_colors = [colors.get(status, '#CCCCCC') for status in statuses]
+        pie_colors = [colors.get(label, '#CCCCCC') for label in labels]
         
-        wedges, texts, autotexts = ax1.pie(counts, labels=statuses, autopct='%1.1f%%', 
-                                          colors=pie_colors, startangle=90)
+        ax1.pie(counts, labels=labels, autopct='%1.1f%%', colors=pie_colors, startangle=90)
         ax1.set_title('Overall Request Status Distribution')
+        ax1.axis('equal') # Ensures pie is drawn as a circle.
         
-        # Approval rates by leave type
+        # --- Subplot 2: Approval Rates by Leave Type Bar Chart ---
         type_approval_data.sort(key=lambda x: x[1], reverse=True)
         types = [x[0] for x in type_approval_data]
         rates = [x[1] for x in type_approval_data]
         totals = [x[2] for x in type_approval_data]
         
-        bars = ax2.bar(types, rates, color='skyblue', alpha=0.7)
+        bars = ax2.bar(types, rates, color='skyblue', alpha=0.8)
         ax2.set_ylabel('Approval Rate (%)')
-        ax2.set_xlabel('Leave Type')
         ax2.set_title('Approval Rates by Leave Type')
-        ax2.set_ylim(0, 100)
+        ax2.set_ylim(0, 105) # Give some space for labels
         
-        # Add value labels and sample sizes
+        # Add text labels on top of bars
         for bar, rate, total in zip(bars, rates, totals):
-            height = bar.get_height()
-            ax2.text(bar.get_x() + bar.get_width()/2., height + 1,
-                    f'{rate:.1f}%\n(n={total})', ha='center', va='bottom', fontsize=9)
+            ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height(),
+                     f'{rate:.1f}%\n(n={total})', ha='center', va='bottom', fontsize=9)
         
-        plt.xticks(rotation=45, ha='right')
+        plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
         plt.tight_layout()
         return self._save_plot_to_base64()
 
-    def get_utilization_analysis_chart(self):
-        """Analyze leave utilization vs. allowances."""
+    def get_utilization_analysis_chart(self) -> Optional[str]: # <-- FIXED
+        """
+        Analyzes how employees are utilizing their monthly leave allowance.
+        
+        1. A bar chart showing the average leave utilization rate per team.
+        2. A histogram showing the distribution of utilization rates across all employees.
+        
+        Returns:
+            A base64 encoded string of the plot PNG, or None if no data.
+        """
         current_month = date.today().replace(day=1)
         
-        # Calculate utilization by employee
-        utilization_data = []
-        for employee in Employee.objects.select_related('team'):
-            # Get approved requests for current month and calculate total days in Python
-            current_month_requests = LeaveRequest.objects.filter(
-                employee=employee,
-                status='approved',
-                start_date__gte=current_month
-            )
-            
-            used_days = sum(request.duration_days for request in current_month_requests)
-            
-            utilization_rate = (used_days / employee.monthly_leave_allowance) * 100 if employee.monthly_leave_allowance > 0 else 0
-            utilization_data.append((employee.team.name if employee.team else 'No Team', utilization_rate))
+        team_utilization = {}
+        all_employees = Employee.objects.select_related('team').filter(monthly_leave_allowance__gt=0)
         
-        if not utilization_data:
+        for employee in all_employees:
+            used_days = sum(req.duration_days for req in LeaveRequest.objects.filter(
+                employee=employee, status='approved', start_date__gte=current_month
+            ))
+            utilization_rate = (used_days / employee.monthly_leave_allowance) * 100
+            
+            team_name = employee.team.name if employee.team else 'No Team'
+            if team_name not in team_utilization:
+                team_utilization[team_name] = []
+            team_utilization[team_name].append(utilization_rate)
+            
+        if not team_utilization:
             return None
             
-        # Group by team
-        team_utilization = {}
-        for team, rate in utilization_data:
-            if team not in team_utilization:
-                team_utilization[team] = []
-            team_utilization[team].append(rate)
-        
-        # Calculate team averages
-        team_averages = [(team, np.mean(rates)) for team, rates in team_utilization.items()]
-        team_averages.sort(key=lambda x: x[1], reverse=True)
+        team_averages = sorted([(team, np.mean(rates)) for team, rates in team_utilization.items()], key=lambda x: x[1], reverse=True)
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Team utilization averages
-        teams = [x[0] for x in team_averages]
-        avg_rates = [x[1] for x in team_averages]
-        
+        # --- Subplot 1: Team Utilization Averages ---
+        teams, avg_rates = zip(*team_averages)
         colors = ['red' if r > 80 else 'orange' if r > 60 else 'green' for r in avg_rates]
+        
         bars = ax1.barh(teams, avg_rates, color=colors, alpha=0.7)
-        ax1.set_xlabel('Average Utilization (%)')
+        ax1.set_xlabel('Average Utilization of Monthly Allowance (%)')
         ax1.set_title('Team Leave Utilization (Current Month)')
-        ax1.axvline(x=50, color='gray', linestyle='--', alpha=0.5, label='50% Target')
-        ax1.axvline(x=80, color='orange', linestyle='--', alpha=0.5, label='80% Warning')
+        ax1.axvline(x=80, color='orange', linestyle='--', label='80% Warning')
         ax1.legend()
         
-        # Add value labels
         for bar, rate in zip(bars, avg_rates):
-            width = bar.get_width()
-            ax1.text(width + 1, bar.get_y() + bar.get_height()/2, 
-                    f'{rate:.1f}%', ha='left', va='center')
+            ax1.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2, 
+                     f'{rate:.1f}%', ha='left', va='center')
         
-        # Utilization distribution histogram
+        # --- Subplot 2: Employee Utilization Distribution Histogram ---
         all_rates = [rate for team_rates in team_utilization.values() for rate in team_rates]
-        ax2.hist(all_rates, bins=20, color='skyblue', alpha=0.7, edgecolor='black')
+        
+        ax2.hist(all_rates, bins=20, color='skyblue', edgecolor='black')
         ax2.set_xlabel('Utilization Rate (%)')
         ax2.set_ylabel('Number of Employees')
         ax2.set_title('Employee Utilization Distribution')
-        ax2.axvline(x=np.mean(all_rates), color='red', linestyle='--', 
-                   label=f'Average: {np.mean(all_rates):.1f}%')
+        mean_rate = np.mean(all_rates)
+        ax2.axvline(x=mean_rate, color='red', linestyle='--', label=f'Average: {mean_rate:.1f}%')
         ax2.legend()
         
         plt.tight_layout()
         return self._save_plot_to_base64()
 
-    def get_team_workload_impact_chart(self):
-        """Analyze workload impact across teams."""
-        today = date.today()
+    def get_team_workload_impact_chart(self) -> Optional[str]: # <-- FIXED
+        """
+        Generates a line chart forecasting the workload impact for each team over the next 30 days.
         
-        # Get team workload data for next 30 days
-        teams = Team.objects.all()
+        Workload impact is defined as the percentage of a team's members
+        on approved leave on any given day.
+        
+        Returns:
+            A base64 encoded string of the plot PNG, or None if no data.
+        """
+        today = date.today()
+        forecast_days = 30
+        dates = [today + timedelta(days=i) for i in range(forecast_days)]
+        
+        teams = Team.objects.prefetch_related('employee_set').all()
         workload_data = []
         
         for team in teams:
             total_employees = team.employee_set.count()
             if total_employees == 0:
                 continue
-                
-            # Calculate daily impact for next 30 days
+            
+            # Pre-fetch relevant leave requests for the team to optimize queries
+            team_leaves = LeaveRequest.objects.filter(
+                employee__team=team,
+                status='approved',
+                start_date__lte=dates[-1], # leaves that start before the forecast period ends
+                end_date__gte=dates[0]    # leaves that end after the forecast period starts
+            )
+            
             daily_impact = []
-            for i in range(30):
-                check_date = today + timedelta(days=i)
-                on_leave = LeaveRequest.objects.filter(
-                    employee__team=team,
-                    status='approved',
-                    start_date__lte=check_date,
-                    end_date__gte=check_date
-                ).count()
-                
+            for check_date in dates:
+                on_leave = sum(1 for leave in team_leaves if leave.start_date <= check_date <= leave.end_date)
                 impact_percentage = (on_leave / total_employees) * 100
                 daily_impact.append(impact_percentage)
             
@@ -510,49 +592,70 @@ class LeaveRequestAdmin(admin.ModelAdmin):
             
         fig, ax = plt.subplots(figsize=(14, 8))
         
-        dates = [today + timedelta(days=i) for i in range(30)]
-        
-        # Plot each team's workload impact
+        # Plot each team's workload forecast
         for team_name, daily_impact, team_size in workload_data:
-            ax.plot(dates, daily_impact, marker='o', linewidth=2, label=f'{team_name} (n={team_size})')
+            ax.plot(dates, daily_impact, marker='.', linestyle='-', label=f'{team_name} (n={team_size})')
         
-        # Add warning zones
-        ax.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='20% Impact Warning')
-        ax.axhline(y=40, color='red', linestyle='--', alpha=0.5, label='40% Critical Impact')
+        # Add horizontal lines for warning thresholds
+        ax.axhline(y=20, color='orange', linestyle='--', alpha=0.7, label='20% Impact Warning')
+        ax.axhline(y=40, color='red', linestyle='--', alpha=0.7, label='40% Critical Impact')
         
         ax.set_xlabel('Date')
-        ax.set_ylabel('Workload Impact (%)')
+        ax.set_ylabel('Workload Impact (% of team on leave)')
         ax.set_title('30-Day Team Workload Impact Forecast')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         
-        # Format x-axis
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-        ax.xaxis.set_major_locator(mdates.DayLocator(interval=5))
-        plt.xticks(rotation=45)
+        # Format X-axis for better readability
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=3))
+        fig.autofmt_xdate()
         
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout to make space for legend
         return self._save_plot_to_base64()
 
-    def _save_plot_to_base64(self):
-        """Helper method to save matplotlib plot to base64 string."""
+    def _save_plot_to_base64(self) -> str:
+        """
+        Saves the current matplotlib plot to a memory buffer and returns it as a base64 encoded string.
+        
+        This allows embedding the plot directly into HTML templates without
+        saving to a file.
+        
+        Returns:
+            A base64 encoded string representation of the PNG image.
+        """
         buffer = BytesIO()
-        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', 
-                   facecolor='white', edgecolor='none')
+        # Save figure to a PNG in the buffer with high resolution and tight bounding box
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
         buffer.seek(0)
         image_png = buffer.getvalue()
         buffer.close()
+        
+        # Clear the current figure to free memory and prevent plots from overlapping
         plt.clf()
         plt.close()
+        
+        # Encode the PNG image to base64 and decode to a UTF-8 string
         return base64.b64encode(image_png).decode('utf-8')
+
 
 @admin.register(LeaveRequestAudit)
 class LeaveRequestAuditAdmin(admin.ModelAdmin):
-    list_display = ('leave_request', 'action', 'performed_by', 'timestamp')
+    """
+    Admin configuration for the LeaveRequestAudit model.
+    
+    Provides a read-only view of the audit trail for leave requests,
+    tracking actions like creation, approval, and rejection.
+    """
+    list_display = ('leave_request', 'action', 'performed_by', 'timestamp') # 'details' was in your original but not a model field, removed for clarity unless you add it
     list_filter = ('action', 'timestamp')
-    search_fields = ('leave_request__employee__name',)
-    readonly_fields = ('timestamp',)
-    list_display = ('leave_request', 'action', 'performed_by', 'timestamp')
-    list_filter = ('action', 'timestamp')
-    search_fields = ('leave_request__employee__name',)
-    readonly_fields = ('timestamp',)
+    search_fields = ('leave_request__employee__name', 'performed_by__name')
+    readonly_fields = ('leave_request', 'action', 'performed_by', 'timestamp') # removed 'details'
+
+    def has_add_permission(self, request):
+        """Disables the ability to add new audit entries from the admin."""
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        """Disables the ability to change existing audit entries from the admin."""
+        return False

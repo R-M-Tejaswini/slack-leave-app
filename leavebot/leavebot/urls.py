@@ -1,18 +1,28 @@
 # leavebot/leavebot/urls.py
-"""
-Main URL configuration for the leavebot project.
 
-This file routes incoming URL requests to the appropriate Django app.
-All URLs related to the Slack bot functionality are namespaced under `/slack/`
-and handled by the `slackapp`.
 """
+Root URL Configuration for the Leavebot Project.
+
+This module is the primary URL dispatcher for the entire Django project. It acts
+as a table of contents for the site's URLs, routing incoming requests to the
+appropriate application's URL configuration.
+
+The defined patterns are:
+- `/admin/`: Routes to the built-in Django administration site.
+- `/slack/`: Delegates all Slack-related webhook endpoints to the `slackapp`.
+"""
+
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import include, path
 
 urlpatterns = [
-    # The Django admin site
+    # This path includes the URLs for the Django admin interface, a powerful
+    # tool for managing the application's data models (e.g., Employees, Teams).
     path('admin/', admin.site.urls),
-    
-    # All Slack-related endpoints (commands, interactions) are routed to the slackapp
+
+    # This line is key for app organization. It delegates any URL that starts
+    # with `slack/` to be handled by the `urls.py` file within the `slackapp`.
+    # This keeps the project modular and makes the app reusable.
+    # For example, a request to `/slack/commands/` will be routed to `slackapp.urls`.
     path('slack/', include('slackapp.urls')),
 ]
