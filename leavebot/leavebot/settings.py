@@ -10,6 +10,7 @@ and portability.
 
 from pathlib import Path
 import os
+from decouple import config
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,7 +21,7 @@ load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'
 BASE_DIR = Path(__file__).resolve().parent.parent
-SECRET_KEY = '3s46c_-r!p6jh#+q_u7!gwy+6hycu7*2_ofy0jq$r@a)=h_hou'
+SECRET_KEY = config('DJANGO_KEY')
 # The DEBUG flag is loaded as a boolean from an environment variable.
 DEBUG = os.getenv('DJANGO_DEBUG', 'True') == 'True'
 
